@@ -6,7 +6,7 @@ package handler
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -31,9 +31,10 @@ const BasePath = "/api/v1/items"
 // Handler serves BasePath.
 type Handler struct {
 	svc Service
+	log *slog.Logger
 }
 
-func New(svc Service) *Handler { return &Handler{svc: svc} }
+func New(svc Service, log *slog.Logger) *Handler { return &Handler{svc: svc, log: log} }
 
 // itemList is the body of GET BasePath. An object rather than a bare
 // array leaves room for pagination fields later.
@@ -43,7 +44,7 @@ type itemList struct {
 
 // fail writes the problem response that matches err. Unexpected errors are
 // logged, and their details are not sent to the client.
-func fail(w http.ResponseWriter, err error) {
+func (h *Handler) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, httpx.ErrBadRequest):
 		httpx.WriteProblem(w, http.StatusBadRequest, err.Error())
@@ -52,7 +53,7 @@ func fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, items.ErrInvalid):
 		httpx.WriteProblem(w, http.StatusUnprocessableEntity, err.Error())
 	default:
-		log.Printf("items: %v", err)
+		h.log.Error("items", "error", err)
 		httpx.WriteProblem(w, http.StatusInternalServerError, "")
 	}
 }
@@ -69,7 +70,7 @@ func (h *Handler) Register(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	list, err := h.svc.List(r.Context())
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, itemList{Items: list})
@@ -78,12 +79,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var in items.Input
 	if err := httpx.DecodeJSON(r, &in); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	it, err := h.svc.Create(r.Context(), in)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.Header().Set("Location", BasePath+"/"+it.ID)
@@ -93,7 +94,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	it, err := h.svc.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, it)
@@ -102,12 +103,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	var in items.Input
 	if err := httpx.DecodeJSON(r, &in); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	it, err := h.svc.Update(r.Context(), chi.URLParam(r, "id"), in)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, it)
@@ -115,7 +116,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

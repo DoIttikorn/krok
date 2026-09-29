@@ -140,6 +140,7 @@ func BuildPlan(o Options) (Plan, error) {
 //	framework/<id>/       applied for the chosen framework
 //	database/<id>/        applied for the chosen database (skipped for "none")
 //	config/<id>/          applied for the chosen config source
+//	logger/<id>/          applied for the chosen logger
 //	feature/<id>/         applied for each enabled feature
 //
 // Every file must end in ".tmpl"; the suffix is stripped from the output
@@ -160,7 +161,7 @@ func BuildPlanFS(tfs fs.FS, o Options) (Plan, error) {
 	if data.HasDB {
 		layers = append(layers, path.Join("database", o.Database))
 	}
-	layers = append(layers, path.Join("config", o.Config))
+	layers = append(layers, path.Join("config", o.Config), path.Join("logger", o.Logger))
 	for _, f := range o.Features {
 		layers = append(layers, path.Join("feature", f))
 	}

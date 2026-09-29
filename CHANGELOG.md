@@ -14,6 +14,16 @@ may change them.
   adapter. Shared HTTP helpers moved to `internal/httpx`.
 - MySQL connections report rows matched rather than changed
   (`clientFoundRows`), so updating an item with the same values succeeds.
+- `--log slog|zap|zerolog|charm` picks the logging backend (default `slog`).
+  Generated code always logs through `*slog.Logger`, passed down from `main`;
+  only `internal/logger/handler.go` knows the backend. `LOG_LEVEL` and
+  `LOG_FORMAT` (`text` or `json`; the Docker image sets `json`) configure it.
+  The interactive wizard asks for it next to the extras.
+- One request logger for every framework (`httpx.Log`), which also turns
+  panics into 500 responses, replaces Gin's, Echo's and Chi's own loggers and
+  recoverers. River, Asynq, Watermill, Echo and go-redis log through the same
+  logger, so a pod's output is one consistent stream. Each backend encodes
+  `duration` its own way (nanoseconds, seconds or milliseconds).
 
 ## v0.1.1
 

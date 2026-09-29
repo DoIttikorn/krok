@@ -1,0 +1,37 @@
+// Package logger builds the process-wide *slog.Logger. Everything else logs
+// through log/slog, so the backend ({{.Logger}}) only appears in handler.go:
+// switching to another one means replacing that file.
+package logger
+
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+)
+
+// New builds the logger from LOG_LEVEL (debug, info, warn or error; default
+// info) and LOG_FORMAT (text or json; default text), writing to stderr. It
+// also becomes slog's default, so libraries that log through slog or the
+// standard log package end up in the same stream.
+func New() (*slog.Logger, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(getenv("LOG_LEVEL", "info"))); err != nil {
+		return nil, fmt.Errorf("LOG_LEVEL: %w", err)
+	}
+	format := strings.ToLower(getenv("LOG_FORMAT", "text"))
+	if format != "text" && format != "json" {
+		return nil, fmt.Errorf("LOG_FORMAT: %q is not text or json", format)
+	}
+
+	l := slog.New(newHandler(os.Stderr, level, format == "json"))
+	slog.SetDefault(l)
+	return l, nil
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

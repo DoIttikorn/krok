@@ -6,7 +6,7 @@ package handler
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -30,9 +30,10 @@ type Service interface {
 // Handler serves BasePath.
 type Handler struct {
 	svc Service
+	log *slog.Logger
 }
 
-func New(svc Service) *Handler { return &Handler{svc: svc} }
+func New(svc Service, log *slog.Logger) *Handler { return &Handler{svc: svc, log: log} }
 
 // Request and response shapes. Body is the JSON body; other fields map to
 // path parameters and headers through their tags.
@@ -71,7 +72,7 @@ func (h *Handler) Register(api huma.API) {
 	}, func(ctx context.Context, _ *struct{}) (*listOutput, error) {
 		list, err := h.svc.List(ctx)
 		if err != nil {
-			return nil, apiError(err)
+			return nil, h.apiError(err)
 		}
 		out := &listOutput{}
 		out.Body.Items = list
@@ -84,7 +85,7 @@ func (h *Handler) Register(api huma.API) {
 	}, func(ctx context.Context, in *createInput) (*createdOutput, error) {
 		it, err := h.svc.Create(ctx, in.Body)
 		if err != nil {
-			return nil, apiError(err)
+			return nil, h.apiError(err)
 		}
 		return &createdOutput{Location: BasePath + "/" + it.ID, Body: it}, nil
 	})
@@ -95,7 +96,7 @@ func (h *Handler) Register(api huma.API) {
 	}, func(ctx context.Context, in *idInput) (*itemOutput, error) {
 		it, err := h.svc.Get(ctx, in.ID)
 		if err != nil {
-			return nil, apiError(err)
+			return nil, h.apiError(err)
 		}
 		return &itemOutput{Body: it}, nil
 	})
@@ -106,7 +107,7 @@ func (h *Handler) Register(api huma.API) {
 	}, func(ctx context.Context, in *updateInput) (*itemOutput, error) {
 		it, err := h.svc.Update(ctx, in.ID, in.Body)
 		if err != nil {
-			return nil, apiError(err)
+			return nil, h.apiError(err)
 		}
 		return &itemOutput{Body: it}, nil
 	})
@@ -116,7 +117,7 @@ func (h *Handler) Register(api huma.API) {
 		Summary: "Delete an item", Tags: tags, DefaultStatus: http.StatusNoContent,
 	}, func(ctx context.Context, in *idInput) (*struct{}, error) {
 		if err := h.svc.Delete(ctx, in.ID); err != nil {
-			return nil, apiError(err)
+			return nil, h.apiError(err)
 		}
 		return nil, nil
 	})
@@ -124,13 +125,13 @@ func (h *Handler) Register(api huma.API) {
 
 // apiError maps domain errors to problem responses. Unexpected errors are
 // logged, and their details are not sent to the client.
-func apiError(err error) error {
+func (h *Handler) apiError(err error) error {
 	switch {
 	case errors.Is(err, items.ErrNotFound):
 		return huma.Error404NotFound(err.Error())
 	case errors.Is(err, items.ErrInvalid):
 		return huma.Error422UnprocessableEntity(err.Error())
 	}
-	log.Printf("items: %v", err)
+	h.log.Error("items", "error", err)
 	return huma.Error500InternalServerError("")
 }

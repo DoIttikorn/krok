@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,7 +15,10 @@ import (
 // newTestServer returns a Server without external dependencies, so every
 // health check passes. Items are kept by the memory adapter.
 func newTestServer() *Server {
-	return &Server{items: items.NewService(memory.New())}
+	return &Server{
+		log:   slog.New(slog.DiscardHandler),
+		items: items.NewService(memory.New()),
+	}
 }
 
 // do sends a request through the full handler and decodes a JSON response

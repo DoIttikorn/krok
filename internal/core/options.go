@@ -16,6 +16,7 @@ type Options struct {
 	Framework  string   // one of Catalog.Frameworks IDs
 	Database   string   // one of Catalog.Databases IDs
 	Config     string   // one of Catalog.Configs IDs; defaults to "env"
+	Logger     string   // one of Catalog.Loggers IDs; defaults to "slog"
 	Features   []string // Catalog.Features IDs; Normalize sorts them in catalog order
 	GoVersion  string   // "go" directive in go.mod; defaults to the running toolchain
 	Git        bool     // run "git init" after generating
@@ -40,6 +41,7 @@ func Normalize(o Options) (Options, error) {
 	o.Framework = canonical(o.Framework)
 	o.Database = canonical(o.Database)
 	o.Config = canonical(o.Config)
+	o.Logger = canonical(o.Logger)
 	o.GoVersion = strings.TrimPrefix(strings.TrimSpace(o.GoVersion), "go")
 
 	if o.ModulePath == "" {
@@ -50,6 +52,9 @@ func Normalize(o Options) (Options, error) {
 	}
 	if o.Config == "" {
 		o.Config = ConfigEnv
+	}
+	if o.Logger == "" {
+		o.Logger = LoggerSlog
 	}
 
 	var errs []error
@@ -76,6 +81,9 @@ func Normalize(o Options) (Options, error) {
 		errs = append(errs, err)
 	}
 	o.Features = features
+	if !has(cat.Loggers, o.Logger) {
+		errs = append(errs, fmt.Errorf("unknown logger %q (one of %s)", o.Logger, strings.Join(IDs(cat.Loggers), ", ")))
+	}
 	if !has(cat.Configs, o.Config) {
 		errs = append(errs, fmt.Errorf("unknown config source %q (one of %s)", o.Config, strings.Join(IDs(cat.Configs), ", ")))
 	}

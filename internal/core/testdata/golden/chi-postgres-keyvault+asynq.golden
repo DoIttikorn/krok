@@ -58,6 +58,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # distroless/static has CA certificates and runs as a non-root user.
 FROM gcr.io/distroless/static-debian12:nonroot
+# One JSON object per line, for Kubernetes log collectors.
+ENV LOG_FORMAT=json
 COPY --from=build /out/api /api
 # The worker ships in the same image; run it with entrypoint ["/worker"].
 COPY --from=build /out/worker /worker
@@ -236,6 +238,20 @@ them as separate Deployments so each scales on its own.
 | --- | --- | --- |
 | Asynq | `tasks.Client.Enqueue(tasks.NewExampleTask(...))` | `tasks.RunWorker`, register handlers there |
 
+## Logging
+
+Everything logs through `log/slog`; `internal/logger` builds the logger, with
+**slog** as the backend. Requests are logged once, the same way for every
+framework, by `httpx.Log`, which also turns panics into 500 responses. Each worker logs with a `worker` attribute.
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |
+| `LOG_FORMAT` | `text`, `json` | `text`; the Docker image sets `json` |
+
+To switch backends, replace `internal/logger/handler.go`; nothing else refers
+to slog.
+
 ## Configuration
 
 Settings are read from Azure Key Vault at startup (`internal/config`):
@@ -284,13 +300,15 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"fmt"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/example/my-api/internal/config"
+	"github.com/example/my-api/internal/logger"
 	"github.com/example/my-api/internal/server"
 )
 
@@ -298,37 +316,45 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Settings first: LOG_LEVEL and LOG_FORMAT can come from them.
 	if err := config.Load(ctx); err != nil {
-		log.Fatalf("load config: %v", err)
+		fmt.Fprintln(os.Stderr, "load config:", err)
+		os.Exit(1)
+	}
+	log, err := logger.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "logger:", err)
+		os.Exit(1)
 	}
 
-	srv, err := server.New(ctx)
+	srv, err := server.New(ctx, log)
 	if err != nil {
-		log.Fatalf("create server: %v", err)
+		log.Error("create server", "error", err)
+		os.Exit(1)
 	}
 	defer srv.Close()
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s", srv.Addr())
+		log.Info("listening", "addr", srv.Addr())
 		errCh <- srv.ListenAndServe()
 	}()
 
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("server error: %v", err)
+			log.Error("server", "error", err)
 		}
 		return
 	case <-ctx.Done():
 	}
 
 	// Keep this below the pod's terminationGracePeriodSeconds (30s).
-	log.Println("shutting down")
+	log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("shutdown: %v", err)
+		log.Error("shutdown", "error", err)
 	}
 }
 -- cmd/worker/main.go --
@@ -340,7 +366,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -349,6 +375,7 @@ import (
 	"time"
 
 	"github.com/example/my-api/internal/config"
+	"github.com/example/my-api/internal/logger"
 	"github.com/example/my-api/internal/tasks"
 )
 
@@ -356,26 +383,38 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Settings first: LOG_LEVEL and LOG_FORMAT can come from them.
 	if err := config.Load(ctx); err != nil {
-		log.Fatalf("load config: %v", err)
+		fmt.Fprintln(os.Stderr, "load config:", err)
+		os.Exit(1)
+	}
+	log, err := logger.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "logger:", err)
+		os.Exit(1)
 	}
 
 	probes := probeServer()
 	go func() {
 		if err := probes.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("probe server: %v", err)
+			log.Error("probe server", "error", err)
 		}
 	}()
 	defer probes.Close()
 
-	err := run(ctx, map[string]func(context.Context) error{
+	err = run(ctx, log, map[string]worker{
 		"asynq": tasks.RunWorker,
 	})
 	if err != nil {
-		log.Fatalf("worker: %v", err)
+		log.Error("worker stopped", "error", err)
+		os.Exit(1)
 	}
-	log.Println("worker stopped")
+	log.Info("worker stopped")
 }
+
+// worker consumes until ctx is done. It logs through log, which already
+// carries the worker's name.
+type worker func(ctx context.Context, log *slog.Logger) error
 
 // probeServer serves /livez and /readyz on HEALTH_PORT (default 8081) for
 // Kubernetes. The worker takes no traffic, so both only report that the
@@ -398,7 +437,7 @@ func probeServer() *http.Server {
 
 // run starts every worker and waits for all of them. When one fails, the
 // others are stopped and its error is returned.
-func run(ctx context.Context, workers map[string]func(context.Context) error) error {
+func run(ctx context.Context, log *slog.Logger, workers map[string]worker) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -408,8 +447,9 @@ func run(ctx context.Context, workers map[string]func(context.Context) error) er
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			log.Printf("%s: started", name)
-			if err := work(ctx); err != nil {
+			wlog := log.With("worker", name)
+			wlog.Info("started")
+			if err := work(ctx, wlog); err != nil {
 				errs <- fmt.Errorf("%s: %w", name, err)
 				cancel()
 			}
@@ -1016,7 +1056,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 )
 
@@ -1042,7 +1082,7 @@ func JSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("write response: %v", err)
+		slog.Default().Warn("write response", "error", err)
 	}
 }
 
@@ -1060,7 +1100,116 @@ func WriteProblem(w http.ResponseWriter, status int, detail string) {
 	w.WriteHeader(status)
 	p := Problem{Title: http.StatusText(status), Status: status, Detail: detail}
 	if err := json.NewEncoder(w).Encode(p); err != nil {
-		log.Printf("write response: %v", err)
+		slog.Default().Warn("write response", "error", err)
+	}
+}
+-- internal/httpx/middleware.go --
+package httpx
+
+import (
+	"log/slog"
+	"net/http"
+	"runtime/debug"
+	"time"
+)
+
+// Log logs every request through log and turns a panic into a 500 response,
+// so all frameworks log requests the same way. 5xx responses are logged at
+// error level, everything else at info.
+func Log(log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &recorder{ResponseWriter: w, status: http.StatusOK}
+			defer func() {
+				if v := recover(); v != nil {
+					if v == http.ErrAbortHandler {
+						panic(v) // the server's signal to abort the response
+					}
+					log.ErrorContext(r.Context(), "panic", "error", v, "stack", string(debug.Stack()))
+					if !rec.wroteHeader {
+						WriteProblem(rec, http.StatusInternalServerError, "")
+					}
+				}
+				level := slog.LevelInfo
+				if rec.status >= http.StatusInternalServerError {
+					level = slog.LevelError
+				}
+				log.LogAttrs(r.Context(), level, "request",
+					slog.String("method", r.Method),
+					slog.String("path", r.URL.Path),
+					slog.Int("status", rec.status),
+					slog.Int("bytes", rec.bytes),
+					slog.Duration("duration", time.Since(start)),
+					slog.String("remote", r.RemoteAddr),
+				)
+			}()
+			next.ServeHTTP(rec, r)
+		})
+	}
+}
+
+// recorder remembers the status and size of a response.
+type recorder struct {
+	http.ResponseWriter
+	status, bytes int
+	wroteHeader   bool
+}
+
+func (r *recorder) WriteHeader(code int) {
+	if !r.wroteHeader {
+		r.status, r.wroteHeader = code, true
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *recorder) Write(b []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	n, err := r.ResponseWriter.Write(b)
+	r.bytes += n
+	return n, err
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer, e.g. to
+// flush.
+func (r *recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+-- internal/httpx/middleware_test.go --
+package httpx
+
+import (
+	"bytes"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestLogRecordsStatus(t *testing.T) {
+	var buf bytes.Buffer
+	h := Log(slog.New(slog.NewTextHandler(&buf, nil)))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/brew", nil))
+	if out := buf.String(); !strings.Contains(out, "status=418") || !strings.Contains(out, "path=/brew") {
+		t.Errorf("log = %q, want status=418 and path=/brew", out)
+	}
+}
+
+func TestLogRecoversPanics(t *testing.T) {
+	var buf bytes.Buffer
+	h := Log(slog.New(slog.NewTextHandler(&buf, nil)))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if out := buf.String(); !strings.Contains(out, "boom") || !strings.Contains(out, "level=ERROR") {
+		t.Errorf("log = %q, want the panic at error level", out)
 	}
 }
 -- internal/items/handler/handler.go --
@@ -1071,7 +1220,7 @@ package handler
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -1096,9 +1245,10 @@ const BasePath = "/api/v1/items"
 // Handler serves BasePath.
 type Handler struct {
 	svc Service
+	log *slog.Logger
 }
 
-func New(svc Service) *Handler { return &Handler{svc: svc} }
+func New(svc Service, log *slog.Logger) *Handler { return &Handler{svc: svc, log: log} }
 
 // itemList is the body of GET BasePath. An object rather than a bare
 // array leaves room for pagination fields later.
@@ -1108,7 +1258,7 @@ type itemList struct {
 
 // fail writes the problem response that matches err. Unexpected errors are
 // logged, and their details are not sent to the client.
-func fail(w http.ResponseWriter, err error) {
+func (h *Handler) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, httpx.ErrBadRequest):
 		httpx.WriteProblem(w, http.StatusBadRequest, err.Error())
@@ -1117,7 +1267,7 @@ func fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, items.ErrInvalid):
 		httpx.WriteProblem(w, http.StatusUnprocessableEntity, err.Error())
 	default:
-		log.Printf("items: %v", err)
+		h.log.Error("items", "error", err)
 		httpx.WriteProblem(w, http.StatusInternalServerError, "")
 	}
 }
@@ -1134,7 +1284,7 @@ func (h *Handler) Register(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	list, err := h.svc.List(r.Context())
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, itemList{Items: list})
@@ -1143,12 +1293,12 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var in items.Input
 	if err := httpx.DecodeJSON(r, &in); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	it, err := h.svc.Create(r.Context(), in)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.Header().Set("Location", BasePath+"/"+it.ID)
@@ -1158,7 +1308,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	it, err := h.svc.Get(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, it)
@@ -1167,12 +1317,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	var in items.Input
 	if err := httpx.DecodeJSON(r, &in); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	it, err := h.svc.Update(r.Context(), chi.URLParam(r, "id"), in)
 	if err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, it)
@@ -1180,7 +1330,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	if err := h.svc.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
-		fail(w, err)
+		h.fail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1801,12 +1951,117 @@ func TestListIsNeverNil(t *testing.T) {
 		t.Errorf("List = %#v, %v; want an empty, non-nil slice", list, err)
 	}
 }
+-- internal/logger/handler.go --
+package logger
+
+import (
+	"io"
+	"log/slog"
+)
+
+// newHandler uses the standard library's handlers.
+func newHandler(w io.Writer, level slog.Level, json bool) slog.Handler {
+	opts := &slog.HandlerOptions{Level: level}
+	if json {
+		return slog.NewJSONHandler(w, opts)
+	}
+	return slog.NewTextHandler(w, opts)
+}
+-- internal/logger/logger.go --
+// Package logger builds the process-wide *slog.Logger. Everything else logs
+// through log/slog, so the backend (slog) only appears in handler.go:
+// switching to another one means replacing that file.
+package logger
+
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"strings"
+)
+
+// New builds the logger from LOG_LEVEL (debug, info, warn or error; default
+// info) and LOG_FORMAT (text or json; default text), writing to stderr. It
+// also becomes slog's default, so libraries that log through slog or the
+// standard log package end up in the same stream.
+func New() (*slog.Logger, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(getenv("LOG_LEVEL", "info"))); err != nil {
+		return nil, fmt.Errorf("LOG_LEVEL: %w", err)
+	}
+	format := strings.ToLower(getenv("LOG_FORMAT", "text"))
+	if format != "text" && format != "json" {
+		return nil, fmt.Errorf("LOG_FORMAT: %q is not text or json", format)
+	}
+
+	l := slog.New(newHandler(os.Stderr, level, format == "json"))
+	slog.SetDefault(l)
+	return l, nil
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}
+-- internal/logger/logger_test.go --
+package logger
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"strings"
+	"testing"
+)
+
+func TestHandler(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		var buf bytes.Buffer
+		l := slog.New(newHandler(&buf, slog.LevelInfo, asJSON))
+		l.Debug("hidden")
+		l.Info("shown", "key", "value")
+		l.Error("failed", "error", "boom")
+
+		out := buf.String()
+		if strings.Contains(out, "hidden") {
+			t.Errorf("json=%v: debug record logged at info level:\n%s", asJSON, out)
+		}
+		for _, want := range []string{"shown", "value", "failed", "boom"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("json=%v: output lacks %q:\n%s", asJSON, want, out)
+			}
+		}
+		if asJSON {
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				if !json.Valid([]byte(line)) {
+					t.Errorf("not a JSON line: %s", line)
+				}
+			}
+		}
+	}
+}
+
+func TestNewRejectsBadSettings(t *testing.T) {
+	t.Setenv("LOG_LEVEL", "loud")
+	if _, err := New(); err == nil {
+		t.Error("LOG_LEVEL=loud: want an error")
+	}
+	t.Setenv("LOG_LEVEL", "debug")
+	t.Setenv("LOG_FORMAT", "xml")
+	if _, err := New(); err == nil {
+		t.Error("LOG_FORMAT=xml: want an error")
+	}
+}
 -- internal/redis/redis.go --
 // Package redis connects to Redis with go-redis.
 package redis
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 
@@ -1830,6 +2085,16 @@ func New() (*Client, error) {
 	}), nil
 }
 
+// go-redis logs connection problems on its own logger; send them through
+// slog like everything else.
+func init() { goredis.SetLogger(slogLogger{}) }
+
+type slogLogger struct{}
+
+func (slogLogger) Printf(ctx context.Context, format string, v ...any) {
+	slog.Default().WarnContext(ctx, "redis: "+fmt.Sprintf(format, v...))
+}
+
 func getenv(key, fallback string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
@@ -1841,7 +2106,6 @@ package server
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
@@ -1882,7 +2146,7 @@ func (s *Server) health(ctx context.Context) (int, map[string]string) {
 	code, res := http.StatusOK, map[string]string{"status": "up"}
 	for name, check := range s.checks {
 		if err := check(ctx); err != nil {
-			log.Printf("health check %s: %v", name, err)
+			s.log.WarnContext(ctx, "health check failed", "check", name, "error", err)
 			res[name] = "down"
 			res["status"] = "down"
 			code = http.StatusServiceUnavailable
@@ -2023,7 +2287,6 @@ package server
 
 import (
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"net/http"
 
 	"github.com/example/my-api/internal/httpx"
@@ -2033,11 +2296,11 @@ import (
 // RegisterRoutes returns the router with every API route mounted. The
 // probes (/livez, /readyz, /health) are served by Handler.
 func (s *Server) RegisterRoutes() http.Handler {
+	// Requests are logged, and panics recovered, by httpx.Log in Handler.
 	r := chi.NewRouter()
-	r.Use(middleware.Logger, middleware.Recoverer)
 
 	r.Get("/", s.helloHandler)
-	r.Route(itemshandler.BasePath, itemshandler.New(s.items).Register)
+	r.Route(itemshandler.BasePath, itemshandler.New(s.items, s.log).Register)
 
 	return r
 }
@@ -2050,6 +2313,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -2062,7 +2326,10 @@ import (
 // newTestServer returns a Server without external dependencies, so every
 // health check passes. Items are kept by the memory adapter.
 func newTestServer() *Server {
-	return &Server{items: items.NewService(memory.New())}
+	return &Server{
+		log:   slog.New(slog.DiscardHandler),
+		items: items.NewService(memory.New()),
+	}
 }
 
 // do sends a request through the full handler and decodes a JSON response
@@ -2099,12 +2366,13 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
 
+	"github.com/example/my-api/internal/httpx"
 	"github.com/example/my-api/internal/items"
 	itemstore "github.com/example/my-api/internal/items/postgres"
 
@@ -2115,6 +2383,7 @@ import (
 
 // Server is the HTTP server and the dependencies its handlers need.
 type Server struct {
+	log           *slog.Logger
 	srv           *http.Server
 	draining      atomic.Bool   // set by Shutdown; fails /readyz
 	shutdownDelay time.Duration // SHUTDOWN_DELAY, see Shutdown
@@ -2129,14 +2398,15 @@ type Server struct {
 	tasks  *tasks.Client // enqueue Asynq tasks
 }
 
-// New connects the dependencies and builds the HTTP server. Call Close when
-// done to release them.
-func New(ctx context.Context) (*Server, error) {
+// New connects the dependencies and builds the HTTP server, logging through
+// log. Call Close when done to release the dependencies.
+func New(ctx context.Context, log *slog.Logger) (*Server, error) {
 	delay, err := time.ParseDuration(getenv("SHUTDOWN_DELAY", "0s"))
 	if err != nil {
 		return nil, fmt.Errorf("SHUTDOWN_DELAY: %w", err)
 	}
 	s := &Server{
+		log:           log,
 		shutdownDelay: delay,
 		checks:        map[string]func(context.Context) error{},
 	}
@@ -2184,13 +2454,14 @@ func New(ctx context.Context) (*Server, error) {
 }
 
 // Handler serves the probes and the API. The probes are mounted outside the
-// framework router so they stay cheap and don't fill the request log.
+// framework router and the request log, so they stay cheap and quiet. The
+// API gets one request logger for every framework (httpx.Log).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.livez)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /health", s.healthz)
-	mux.Handle("/", s.RegisterRoutes())
+	mux.Handle("/", httpx.Log(s.log)(s.RegisterRoutes()))
 	return mux
 }
 
@@ -2207,7 +2478,7 @@ func (s *Server) ListenAndServe() error { return s.srv.ListenAndServe() }
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.draining.Store(true)
 	if s.shutdownDelay > 0 {
-		log.Printf("draining for %s", s.shutdownDelay)
+		s.log.Info("draining", "delay", s.shutdownDelay)
 		select {
 		case <-time.After(s.shutdownDelay):
 		case <-ctx.Done():
@@ -2221,7 +2492,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) Close() {
 	for i := len(s.closers) - 1; i >= 0; i-- {
 		if err := s.closers[i](); err != nil {
-			log.Printf("close: %v", err)
+			s.log.Error("close dependency", "error", err)
 		}
 	}
 }
@@ -2240,7 +2511,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 
 	"github.com/hibiken/asynq"
 
@@ -2272,16 +2544,19 @@ type Client = asynq.Client
 func NewClient(rdb *redis.Client) *Client { return asynq.NewClientFromRedisClient(rdb) }
 
 // RunWorker processes tasks until ctx is done. cmd/worker calls it.
-func RunWorker(ctx context.Context) error {
+func RunWorker(ctx context.Context, log *slog.Logger) error {
 	rdb, err := redis.New()
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
 
-	srv := asynq.NewServerFromRedisClient(rdb, asynq.Config{Concurrency: 10})
+	srv := asynq.NewServerFromRedisClient(rdb, asynq.Config{
+		Concurrency: 10,
+		Logger:      asynqLogger{log},
+	})
 	mux := asynq.NewServeMux()
-	mux.HandleFunc(TypeExample, handleExample)
+	mux.HandleFunc(TypeExample, handleExample(log))
 	if err := srv.Start(mux); err != nil {
 		return err
 	}
@@ -2290,11 +2565,27 @@ func RunWorker(ctx context.Context) error {
 	return nil
 }
 
-func handleExample(ctx context.Context, t *asynq.Task) error {
-	var p ExamplePayload
-	if err := json.Unmarshal(t.Payload(), &p); err != nil {
-		return fmt.Errorf("decode %s payload: %w", t.Type(), err)
+func handleExample(log *slog.Logger) asynq.HandlerFunc {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var p ExamplePayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return fmt.Errorf("decode %s payload: %w", t.Type(), err)
+		}
+		log.InfoContext(ctx, "task", "type", t.Type(), "message", p.Message)
+		return nil
 	}
-	log.Printf("asynq: %s: %s", t.Type(), p.Message)
-	return nil
+}
+
+// asynqLogger sends Asynq's own logs through slog.
+type asynqLogger struct{ log *slog.Logger }
+
+func (l asynqLogger) Debug(args ...any) { l.log.Debug(fmt.Sprint(args...)) }
+func (l asynqLogger) Info(args ...any)  { l.log.Info(fmt.Sprint(args...)) }
+func (l asynqLogger) Warn(args ...any)  { l.log.Warn(fmt.Sprint(args...)) }
+func (l asynqLogger) Error(args ...any) { l.log.Error(fmt.Sprint(args...)) }
+
+// Fatal exits, as asynq.Logger requires.
+func (l asynqLogger) Fatal(args ...any) {
+	l.log.Error(fmt.Sprint(args...))
+	os.Exit(1)
 }

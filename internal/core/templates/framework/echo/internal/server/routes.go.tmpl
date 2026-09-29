@@ -7,7 +7,6 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humaecho"
 {{- end}}
 	"github.com/labstack/echo/v5"
-	"github.com/labstack/echo/v5/middleware"
 
 	itemshandler "{{.ModulePath}}/internal/items/handler"
 )
@@ -15,15 +14,16 @@ import (
 // RegisterRoutes returns the router with every API route mounted. The
 // probes (/livez, /readyz, /health) are served by Handler.
 func (s *Server) RegisterRoutes() http.Handler {
+	// Requests are logged, and panics recovered, by httpx.Log in Handler.
 	e := echo.New()
-	e.Use(middleware.RequestLogger(), middleware.Recover())
+	e.Logger = s.log
 
 	e.GET("/", s.helloHandler)
 {{- if .Has "openapi"}}
 	api := humaecho.New(e, apiConfig())
-	itemshandler.New(s.items).Register(api)
+	itemshandler.New(s.items, s.log).Register(api)
 {{- else}}
-	itemshandler.New(s.items).Register(e.Group(itemshandler.BasePath))
+	itemshandler.New(s.items, s.log).Register(e.Group(itemshandler.BasePath))
 {{- end}}
 
 	return e

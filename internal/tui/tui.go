@@ -21,11 +21,13 @@ import (
 // Fields selects which options Ask should prompt for. Fields already given
 // on the command line are skipped.
 type Fields struct {
-	Name, Module, Framework, Database, Features bool
+	Name, Module, Framework, Database, Logger, Features bool
 }
 
 // Any reports whether at least one field needs asking.
-func (f Fields) Any() bool { return f.Name || f.Module || f.Framework || f.Database || f.Features }
+func (f Fields) Any() bool {
+	return f.Name || f.Module || f.Framework || f.Database || f.Logger || f.Features
+}
 
 // ANSI 16-color palette so the output follows the user's terminal theme.
 var (
@@ -88,6 +90,16 @@ func Ask(ctx context.Context, o *core.Options, f Fields) error {
 	}
 
 	var extras []huh.Field
+	if f.Logger {
+		if o.Logger == "" {
+			o.Logger = core.LoggerSlog
+		}
+		extras = append(extras, huh.NewSelect[string]().
+			Title("Logger").
+			Description("The backend behind log/slog.").
+			Options(options(cat.Loggers)...).
+			Value(&o.Logger))
+	}
 	if f.Features {
 		extras = append(extras, huh.NewMultiSelect[string]().
 			Title("Extras").
@@ -170,6 +182,7 @@ func Summary(p core.Plan) string {
 		{"Framework", choiceName(cat.Frameworks, o.Framework)},
 		{"Database", choiceName(cat.Databases, o.Database)},
 		{"Config", choiceName(cat.Configs, o.Config)},
+		{"Logger", choiceName(cat.Loggers, o.Logger)},
 		{"Extras", extras(cat, o.Features)},
 		{"Go", o.GoVersion},
 		{"Git", git},

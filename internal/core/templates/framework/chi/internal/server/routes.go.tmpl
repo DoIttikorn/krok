@@ -7,7 +7,6 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 {{- end}}
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 
 	"{{.ModulePath}}/internal/httpx"
 	itemshandler "{{.ModulePath}}/internal/items/handler"
@@ -16,15 +15,15 @@ import (
 // RegisterRoutes returns the router with every API route mounted. The
 // probes (/livez, /readyz, /health) are served by Handler.
 func (s *Server) RegisterRoutes() http.Handler {
+	// Requests are logged, and panics recovered, by httpx.Log in Handler.
 	r := chi.NewRouter()
-	r.Use(middleware.Logger, middleware.Recoverer)
 
 	r.Get("/", s.helloHandler)
 {{- if .Has "openapi"}}
 	api := humachi.New(r, apiConfig())
-	itemshandler.New(s.items).Register(api)
+	itemshandler.New(s.items, s.log).Register(api)
 {{- else}}
-	r.Route(itemshandler.BasePath, itemshandler.New(s.items).Register)
+	r.Route(itemshandler.BasePath, itemshandler.New(s.items, s.log).Register)
 {{- end}}
 
 	return r

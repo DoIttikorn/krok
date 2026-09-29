@@ -34,9 +34,9 @@ func Execute(ctx context.Context) error {
 }
 
 type newFlags struct {
-	module, framework, database string
-	git, keyVault, yes, dryRun  bool
-	features                    map[string]*bool // one --<id> flag per catalog feature
+	module, framework, database, logger string
+	git, keyVault, yes, dryRun          bool
+	features                            map[string]*bool // one --<id> flag per catalog feature
 }
 
 func newCmd() *cobra.Command {
@@ -52,6 +52,7 @@ func newCmd() *cobra.Command {
 			"  krok new my-api --framework chi --database postgres\n" +
 			"  krok new my-api -f echo -d mysql --key-vault\n" +
 			"  krok new my-api -f chi -d postgres --redis --kafka --river\n" +
+			"  krok new my-api -f gin -d mysql --log zap\n" +
 			"  krok new my-api -f gin -d none -m github.com/you/my-api --dry-run",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,6 +64,7 @@ func newCmd() *cobra.Command {
 	fl.StringVarP(&f.framework, "framework", "f", "", "web framework: "+strings.Join(core.IDs(cat.Frameworks), ", "))
 	fl.StringVarP(&f.database, "database", "d", "", "database: "+strings.Join(core.IDs(cat.Databases), ", "))
 	fl.StringVarP(&f.module, "module", "m", "", "Go module path (default: project name)")
+	fl.StringVar(&f.logger, "log", "", "logger backend behind slog: "+strings.Join(core.IDs(cat.Loggers), ", ")+" (default slog)")
 	fl.BoolVar(&f.keyVault, "key-vault", false, "read settings from Azure Key Vault instead of .env")
 	for _, c := range cat.Features {
 		f.features[c.ID] = fl.Bool(c.ID, false, c.Description)
@@ -82,6 +84,7 @@ func newCmd() *cobra.Command {
 	}
 	_ = cmd.RegisterFlagCompletionFunc("framework", complete(cat.Frameworks))
 	_ = cmd.RegisterFlagCompletionFunc("database", complete(cat.Databases))
+	_ = cmd.RegisterFlagCompletionFunc("log", complete(cat.Loggers))
 	return cmd
 }
 
@@ -93,6 +96,7 @@ func runNew(cmd *cobra.Command, args []string, f newFlags) error {
 		ModulePath: f.module,
 		Framework:  f.framework,
 		Database:   f.database,
+		Logger:     f.logger,
 		Git:        f.git,
 	}
 	if f.keyVault {
@@ -115,8 +119,11 @@ func runNew(cmd *cobra.Command, args []string, f newFlags) error {
 		Framework: o.Framework == "",
 		Database:  o.Database == "",
 	}
-	// Extras are optional, so only offer them while already asking questions.
-	ask.Features = ask.Any() && !featureFlags
+	// Extras and the logger are optional, so only offer them while already
+	// asking questions.
+	wizard := ask.Any()
+	ask.Features = wizard && !featureFlags
+	ask.Logger = wizard && !cmd.Flags().Changed("log")
 	interactive := isTerminal()
 	if ask.Any() {
 		if !interactive {

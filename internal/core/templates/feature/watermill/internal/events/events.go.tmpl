@@ -8,7 +8,6 @@ import (
 {{- if eq .Watermill "redis"}}
 	"errors"
 {{- end}}
-	"log"
 	"log/slog"
 
 	"github.com/ThreeDotsLabs/watermill"
@@ -38,8 +37,6 @@ const Topic = "example.events"
 // Publisher publishes messages, e.g. via Publish.
 type Publisher = message.Publisher
 
-var logger = watermill.NewSlogLogger(slog.Default())
-
 // Publish sends payload to topic.
 func Publish(ctx context.Context, pub Publisher, topic string, payload []byte) error {
 	msg := message.NewMessage(watermill.NewUUID(), payload)
@@ -47,8 +44,10 @@ func Publish(ctx context.Context, pub Publisher, topic string, payload []byte) e
 	return pub.Publish(topic, msg)
 }
 
-// NewPublisher connects a publisher to the broker.
-func NewPublisher() (Publisher, error) {
+// NewPublisher connects a publisher to the broker. Watermill logs through
+// log.
+func NewPublisher(log *slog.Logger) (Publisher, error) {
+	logger := watermill.NewSlogLogger(log)
 {{- if eq .Watermill "kafka"}}
 	return wmkafka.NewPublisher(wmkafka.PublisherConfig{
 		Brokers:   kafka.Brokers(),
@@ -70,7 +69,7 @@ func NewPublisher() (Publisher, error) {
 {{- end}}
 }
 
-func newSubscriber() (message.Subscriber, error) {
+func newSubscriber(logger watermill.LoggerAdapter) (message.Subscriber, error) {
 {{- if eq .Watermill "kafka"}}
 	return wmkafka.NewSubscriber(wmkafka.SubscriberConfig{
 		Brokers:               kafka.Brokers(),
@@ -99,8 +98,9 @@ func newSubscriber() (message.Subscriber, error) {
 
 // RunWorker handles messages until ctx is done. Add handlers to the router
 // here. cmd/worker calls it.
-func RunWorker(ctx context.Context) error {
-	sub, err := newSubscriber()
+func RunWorker(ctx context.Context, log *slog.Logger) error {
+	logger := watermill.NewSlogLogger(log)
+	sub, err := newSubscriber(logger)
 	if err != nil {
 		return err
 	}
@@ -110,13 +110,11 @@ func RunWorker(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	router.AddConsumerHandler("example", Topic, sub, handleExample)
+	router.AddConsumerHandler("example", Topic, sub, func(msg *message.Message) error {
+		log.InfoContext(msg.Context(), "message", "uuid", msg.UUID, "payload", string(msg.Payload))
+		return nil
+	})
 	return router.Run(ctx)
-}
-
-func handleExample(msg *message.Message) error {
-	log.Printf("watermill: %s: %s", msg.UUID, msg.Payload)
-	return nil
 }
 {{- if eq .Watermill "redis"}}
 

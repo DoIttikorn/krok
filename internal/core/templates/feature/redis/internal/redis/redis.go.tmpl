@@ -2,7 +2,9 @@
 package redis
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 
@@ -24,6 +26,16 @@ func New() (*Client, error) {
 		Password: os.Getenv("REDIS_PASSWORD"),
 		DB:       db,
 	}), nil
+}
+
+// go-redis logs connection problems on its own logger; send them through
+// slog like everything else.
+func init() { goredis.SetLogger(slogLogger{}) }
+
+type slogLogger struct{}
+
+func (slogLogger) Printf(ctx context.Context, format string, v ...any) {
+	slog.Default().WarnContext(ctx, "redis: "+fmt.Sprintf(format, v...))
 }
 
 func getenv(key, fallback string) string {

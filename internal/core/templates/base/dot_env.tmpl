@@ -4,6 +4,8 @@
 AZURE_KEY_VAULT_NAME=
 {{else -}}
 PORT=8080
+LOG_LEVEL=info
+LOG_FORMAT=text
 {{- if .HasDB}}
 DB_HOST=localhost
 DB_PORT={{.DBPort}}
