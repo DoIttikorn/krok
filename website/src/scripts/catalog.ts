@@ -75,7 +75,15 @@ export function normalize(c: Config): Config {
   return { ...c, extras: extras.map((e) => e.id).filter((id) => on.has(id)) };
 }
 
-export function command(c: Config, name = "my-api"): string {
+export const defaultName = "my-api";
+
+// Same rule as ValidateName in internal/core/options.go.
+const nameRe = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+export function validName(name: string): boolean {
+  return nameRe.test(name);
+}
+
+export function command(c: Config, name = defaultName): string {
   const parts = ["krok new", name, `-f ${c.framework}`, `-d ${c.database}`];
   for (const e of extras) if (c.extras.includes(e.id)) parts.push(e.flag);
   return parts.join(" ");
