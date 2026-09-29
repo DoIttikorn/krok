@@ -205,8 +205,17 @@ export function createScene(container: HTMLElement, tooltip: HTMLElement): Scene
     canvas.style.cursor = hovered ? "pointer" : "grab";
     if (hovered) {
       tooltip.textContent = hovered.label;
-      tooltip.style.transform = `translate(${ev.clientX - r.left + 14}px, ${ev.clientY - r.top + 14}px)`;
       tooltip.hidden = false;
+      // Sit right and below the pointer, but flip to whichever side has room.
+      const x = ev.clientX - r.left;
+      const y = ev.clientY - r.top;
+      const w = tooltip.offsetWidth;
+      const h = tooltip.offsetHeight;
+      const gap = 14;
+      const m = 8;
+      const left = x + gap + w > r.width - m ? x - gap - w : x + gap;
+      const top = y + gap + h > r.height - m ? y - gap - h : y + gap;
+      tooltip.style.transform = `translate(${Math.max(m, left)}px, ${Math.max(m, top)}px)`;
     } else tooltip.hidden = true;
   });
   canvas.addEventListener("pointerleave", () => {

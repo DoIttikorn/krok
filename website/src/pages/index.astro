@@ -56,6 +56,13 @@ const tree = `my-api/
 
         <div class="card" id="builder">
           <div class="row">
+            <label class="k" for="name">name</label>
+            <div class="field">
+              <input id="name" type="text" placeholder="my-api" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="name-err" />
+              <p id="name-err" class="err" role="alert" hidden>Use letters, digits, '.', '_' or '-', starting with a letter or digit.</p>
+            </div>
+          </div>
+          <div class="row">
             <span class="k">framework</span>
             <div class="chips" data-group="framework">
               {frameworks.map((f, i) => (
@@ -131,10 +138,14 @@ const tree = `my-api/
 </Base>
 
 <script>
-  import { command, normalize, type Config, type Database, type Framework } from "../scripts/catalog";
+  import { command, defaultName, normalize, validName, type Config, type Database, type Framework } from "../scripts/catalog";
 
   const state: Config = { framework: "gin", database: "postgres", extras: [] };
   const cmd = document.getElementById("cmd")!;
+  const nameInput = document.getElementById("name") as HTMLInputElement;
+  const nameErr = document.getElementById("name-err")!;
+  const copy = document.getElementById("copy") as HTMLButtonElement;
+  let name = defaultName; // last valid name, so the command is always runnable
   const stage = document.getElementById("stage")!;
   const tip = document.getElementById("tip")!;
   const chips = document.querySelectorAll<HTMLButtonElement>(".chip");
@@ -143,7 +154,13 @@ const tree = `my-api/
   function render() {
     const c = normalize(state);
     state.extras = c.extras;
-    cmd.textContent = command(c);
+    const typed = nameInput.value.trim();
+    const ok = typed === "" || validName(typed);
+    if (ok) name = typed || defaultName;
+    nameErr.hidden = ok;
+    nameInput.setAttribute("aria-invalid", String(!ok));
+    copy.disabled = !ok;
+    cmd.textContent = command(c, name);
     chips.forEach((b) => {
       const group = (b.parentElement as HTMLElement).dataset.group;
       const v = b.dataset.value!;
@@ -174,7 +191,8 @@ const tree = `my-api/
     stage.classList.toggle("hide-labels", !on);
   });
 
-  const copy = document.getElementById("copy")!;
+  nameInput.addEventListener("input", render);
+
   copy.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(cmd.textContent ?? "");
@@ -215,6 +233,12 @@ const tree = `my-api/
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
   .row { display: grid; grid-template-columns: 84px 1fr; gap: 10px; align-items: start; padding: 8px 0; }
   .k { font: 0.8rem var(--mono); color: var(--muted); padding-top: 6px; }
+  .field { min-width: 0; }
+  #name { width: 100%; font: 0.85rem var(--mono); color: var(--text); background: #060910; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  #name::placeholder { color: #475569; }
+  #name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: transparent; }
+  #name[aria-invalid="true"] { border-color: #f87171; }
+  .err { margin: 6px 2px 0; font-size: 0.78rem; color: #fca5a5; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .chip { font: 0.82rem var(--mono); color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; cursor: pointer; transition: all 0.15s; }
   .chip:hover:not(:disabled) { color: var(--text); border-color: #374151; }
@@ -226,14 +250,15 @@ const tree = `my-api/
   .cmd code { font-size: 0.85rem; overflow-x: auto; white-space: nowrap; color: #a7f3d0; }
   .cmd code::before { content: "$ "; color: var(--muted); }
   #copy { flex: none; font: 0.8rem var(--mono); color: var(--text); background: #1f2937; border: 0; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
-  #copy:hover { background: #374151; }
+  #copy:hover:not(:disabled) { background: #374151; }
+  #copy:disabled { opacity: 0.4; cursor: not-allowed; }
   .install { margin: 10px 2px 0; font-size: 0.85rem; color: var(--muted); }
   .install code { color: var(--text); }
 
   .stage { position: relative; height: min(560px, 70vh); min-height: 340px; border-radius: 18px; border: 1px solid var(--line); background: radial-gradient(ellipse at 50% 40%, #16213a 0%, #0b0f19 70%); overflow: hidden; }
   .stage :global(canvas) { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: pan-y; }
   .stage :global(canvas:active) { cursor: grabbing; }
-  .tip { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; font: 0.78rem var(--mono); background: #0b0f19ee; border: 1px solid var(--line); padding: 4px 8px; border-radius: 6px; white-space: nowrap; }
+  .tip { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; font: 0.78rem var(--mono); background: #0b0f19ee; border: 1px solid var(--line); padding: 4px 8px; border-radius: 6px; width: max-content; max-width: min(260px, calc(100% - 16px)); }
   .hint { position: absolute; bottom: 10px; left: 0; right: 0; text-align: center; margin: 0; font: 0.75rem var(--mono); color: var(--muted); pointer-events: none; }
   .stage :global(.labels) { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
   .stage :global(.lbl) { position: absolute; left: 0; top: 0; white-space: nowrap; font: 600 0.72rem var(--mono); color: var(--text); text-shadow: 0 0 6px #0b0f19, 0 0 2px #0b0f19; will-change: transform; }
