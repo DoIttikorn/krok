@@ -18,12 +18,21 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod # the minimum supported Go
+      - run: go vet ./...
+      - run: go test ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable # staticcheck needs a recent Go
       - name: Check formatting
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
-      - run: go vet ./...
-      - run: go test ./...
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 
