@@ -1,0 +1,252 @@
+---
+import Base from "../layouts/Base.astro";
+import { databases, extras, frameworks } from "../scripts/catalog";
+
+const title = "krok — scaffold a ready-to-run Go API";
+const description =
+  "krok generates a production-shaped Go API with Gin, Echo or Chi, PostgreSQL, MySQL or MongoDB, Docker, Kubernetes manifests, and optional Kafka, RabbitMQ, Redis and OpenAPI.";
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+const features = [
+  ["Ports and adapters", "A worked /api/v1/items example: domain package with no driver imports, a memory adapter, a real database adapter, and a contract test both must pass."],
+  ["Kubernetes-ready", "Kustomize manifests with probes, a PodDisruptionBudget, HPA, zone spread and rolling updates that drain on SIGTERM."],
+  ["Probes done right", "/livez never depends on the database, /readyz checks every dependency, /health shows each one's status."],
+  ["Pick your extras", "Redis, Kafka, RabbitMQ, Asynq, River and Watermill, each with an API side and a worker side in the same image."],
+  ["OpenAPI on request", "--openapi registers routes with Huma: validated requests, a 3.1 spec and docs at /docs for every framework."],
+  ["Config your way", ".env by default, or Azure Key Vault with --key-vault. The code only calls os.Getenv."],
+];
+const tree = `my-api/
+├── cmd/api/main.go
+├── cmd/worker/main.go
+├── internal/
+│   ├── config/
+│   ├── server/        routes, probes, RFC 9457 errors
+│   ├── items/         domain + ports
+│   │   ├── memory/
+│   │   ├── postgres/
+│   │   └── handler/
+│   └── httpx/
+├── deploy/k8s/        Deployment, HPA, PDB, Ingress
+├── Dockerfile         distroless
+├── docker-compose.yml
+└── Makefile`;
+---
+
+<Base title={title} description={description}>
+  <header class="top wrap">
+    <a class="brand" href={`${base}/`}>krok</a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#layout">Layout</a>
+      <a href="https://github.com/DoIttikorn/krok/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/DoIttikorn/krok">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <div class="copy">
+        <p class="eyebrow">v0.x · MIT · Go</p>
+        <h1>Scaffold a Go API that is <span>ready to run</span>.</h1>
+        <p class="lead">
+          Choose a framework and a database. krok writes a tested, containerised,
+          Kubernetes-ready project in seconds. Toggle options below and watch the
+          architecture change.
+        </p>
+
+        <div class="card" id="builder">
+          <div class="row">
+            <span class="k">framework</span>
+            <div class="chips" data-group="framework">
+              {frameworks.map((f, i) => (
+                <button type="button" class="chip" data-value={f} aria-pressed={i === 0}>{f}</button>
+              ))}
+            </div>
+          </div>
+          <div class="row">
+            <span class="k">database</span>
+            <div class="chips" data-group="database">
+              {databases.map((d, i) => (
+                <button type="button" class="chip" data-value={d} aria-pressed={i === 0}>{d}</button>
+              ))}
+            </div>
+          </div>
+          <div class="row">
+            <span class="k">extras</span>
+            <div class="chips" data-group="extras">
+              {extras.map((e) => (
+                <button type="button" class="chip" data-value={e.id} aria-pressed="false">{e.label}</button>
+              ))}
+            </div>
+          </div>
+          <div class="cmd">
+            <code id="cmd" aria-live="polite">krok new my-api -f gin -d postgres</code>
+            <button type="button" id="copy">Copy</button>
+          </div>
+          <p class="install">
+            First: <code>go install github.com/DoIttikorn/krok@latest</code>
+          </p>
+        </div>
+      </div>
+
+      <div class="stage" id="stage" role="img" aria-label="Interactive 3D model of the generated project's layers. Drag to rotate.">
+        <div class="tip" id="tip" hidden></div>
+        <p class="hint">drag to rotate · hover a layer</p>
+        <noscript><p class="fallback">Enable JavaScript to see the interactive model.</p></noscript>
+      </div>
+    </section>
+
+    <section id="features" class="wrap section">
+      <h2>What you get</h2>
+      <div class="grid">
+        {features.map(([t, d]) => (
+          <article>
+            <h3>{t}</h3>
+            <p>{d}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+
+    <section id="layout" class="wrap section split">
+      <div>
+        <h2>A layout you can grow</h2>
+        <p>
+          Every project ships one worked domain as a model for your own. Add
+          domains next to <code>items</code>, keep drivers and frameworks in
+          adapters, and let <code>internal/server</code> be the only place that
+          decides which adapter runs.
+        </p>
+        <p><a href="https://github.com/DoIttikorn/krok#readme">Read the full README →</a></p>
+      </div>
+      <pre class="tree">{tree}</pre>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <span>MIT © krok contributors</span>
+    <a href="https://github.com/DoIttikorn/krok">github.com/DoIttikorn/krok</a>
+  </footer>
+</Base>
+
+<script>
+  import { command, normalize, type Config, type Database, type Framework } from "../scripts/catalog";
+
+  const state: Config = { framework: "gin", database: "postgres", extras: [] };
+  const cmd = document.getElementById("cmd")!;
+  const stage = document.getElementById("stage")!;
+  const tip = document.getElementById("tip")!;
+  const chips = document.querySelectorAll<HTMLButtonElement>(".chip");
+  let scene: { setConfig(c: Config): void } | null = null;
+
+  function render() {
+    const c = normalize(state);
+    state.extras = c.extras;
+    cmd.textContent = command(c);
+    chips.forEach((b) => {
+      const group = (b.parentElement as HTMLElement).dataset.group;
+      const v = b.dataset.value!;
+      const on =
+        group === "extras" ? c.extras.includes(v) : group === "framework" ? c.framework === v : c.database === v;
+      b.setAttribute("aria-pressed", String(on));
+      // River needs postgres, matching the CLI rule.
+      b.disabled = v === "river" && c.database !== "postgres";
+    });
+    scene?.setConfig(c);
+  }
+
+  chips.forEach((b) =>
+    b.addEventListener("click", () => {
+      const group = (b.parentElement as HTMLElement).dataset.group;
+      const v = b.dataset.value!;
+      if (group === "framework") state.framework = v as Framework;
+      else if (group === "database") state.database = v as Database;
+      else state.extras = state.extras.includes(v) ? state.extras.filter((x) => x !== v) : [...state.extras, v];
+      render();
+    }),
+  );
+
+  const copy = document.getElementById("copy")!;
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(cmd.textContent ?? "");
+      copy.textContent = "Copied";
+    } catch {
+      copy.textContent = "Press ⌘/Ctrl+C";
+    }
+    setTimeout(() => (copy.textContent = "Copy"), 1500);
+  });
+
+  render();
+
+  // three.js loads lazily so the page text and SEO content never wait on it.
+  (async () => {
+    try {
+      const { createScene } = await import("../scripts/scene");
+      scene = createScene(stage, tip);
+      scene.setConfig(normalize(state));
+    } catch {
+      stage.classList.add("nogl"); // no WebGL: the builder still works
+    }
+  })();
+</script>
+
+<style>
+  .top { display: flex; justify-content: space-between; align-items: center; padding-top: 20px; padding-bottom: 20px; }
+  .brand { font: 700 1.4rem var(--mono); color: var(--text); }
+  .top nav { display: flex; gap: 20px; font-size: 0.95rem; }
+  .top nav a { color: var(--muted); }
+  .top nav a:hover { color: var(--text); text-decoration: none; }
+
+  .hero { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 32px; align-items: center; padding-top: 24px; padding-bottom: 56px; }
+  .eyebrow { font: 0.8rem var(--mono); color: var(--accent); letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 12px; }
+  h1 { font-size: clamp(2rem, 4.6vw, 3.4rem); line-height: 1.08; margin: 0 0 16px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .lead { color: var(--muted); margin: 0 0 24px; max-width: 52ch; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  .row { display: grid; grid-template-columns: 84px 1fr; gap: 10px; align-items: start; padding: 8px 0; }
+  .k { font: 0.8rem var(--mono); color: var(--muted); padding-top: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font: 0.82rem var(--mono); color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; cursor: pointer; transition: all 0.15s; }
+  .chip:hover:not(:disabled) { color: var(--text); border-color: #374151; }
+  .chip[aria-pressed="true"] { color: #04211d; background: var(--accent); border-color: var(--accent); }
+  .chip:disabled { opacity: 0.35; cursor: not-allowed; }
+  .chip:focus-visible, #copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .cmd { display: flex; gap: 10px; align-items: center; justify-content: space-between; margin-top: 10px; background: #060910; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .cmd code { font-size: 0.85rem; overflow-x: auto; white-space: nowrap; color: #a7f3d0; }
+  .cmd code::before { content: "$ "; color: var(--muted); }
+  #copy { flex: none; font: 0.8rem var(--mono); color: var(--text); background: #1f2937; border: 0; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  #copy:hover { background: #374151; }
+  .install { margin: 10px 2px 0; font-size: 0.85rem; color: var(--muted); }
+  .install code { color: var(--text); }
+
+  .stage { position: relative; height: min(560px, 70vh); min-height: 340px; border-radius: 18px; border: 1px solid var(--line); background: radial-gradient(ellipse at 50% 40%, #16213a 0%, #0b0f19 70%); overflow: hidden; }
+  .stage :global(canvas) { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: pan-y; }
+  .stage :global(canvas:active) { cursor: grabbing; }
+  .tip { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; font: 0.78rem var(--mono); background: #0b0f19ee; border: 1px solid var(--line); padding: 4px 8px; border-radius: 6px; white-space: nowrap; }
+  .hint { position: absolute; bottom: 10px; left: 0; right: 0; text-align: center; margin: 0; font: 0.75rem var(--mono); color: var(--muted); pointer-events: none; }
+  .fallback, .nogl::after { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); margin: 0; }
+  .nogl::after { content: "3D preview needs WebGL."; }
+
+  .section { padding-top: 56px; padding-bottom: 24px; }
+  .section h2 { font-size: 1.7rem; margin: 0 0 20px; letter-spacing: -0.01em; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .grid article { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .grid h3 { margin: 0 0 6px; font-size: 1.05rem; }
+  .grid p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start; }
+  .split p { color: var(--muted); }
+  .split code { color: var(--text); }
+  .tree { margin: 0; background: #060910; border: 1px solid var(--line); border-radius: 12px; padding: 18px; font-size: 0.82rem; line-height: 1.5; overflow-x: auto; color: #cbd5e1; }
+
+  .foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding-top: 48px; padding-bottom: 40px; color: var(--muted); font-size: 0.9rem; }
+
+  @media (max-width: 860px) {
+    .hero, .split { grid-template-columns: 1fr; }
+    .stage { order: -1; height: 340px; }
+    .top nav a:not(:last-child) { display: none; }
+  }
+</style>

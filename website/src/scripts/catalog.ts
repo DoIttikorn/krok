@@ -1,0 +1,61 @@
+// Mirrors internal/core/catalog.go and the rules in internal/core/options.go.
+export type Framework = "gin" | "echo" | "chi";
+export type Database = "postgres" | "mysql" | "mongodb" | "none";
+
+export const frameworks: Framework[] = ["gin", "echo", "chi"];
+export const databases: Database[] = ["postgres", "mysql", "mongodb", "none"];
+
+export interface Extra {
+  id: string;
+  flag: string;
+  label: string;
+  color: number;
+}
+
+export const extras: Extra[] = [
+  { id: "openapi", flag: "--openapi", label: "OpenAPI (Huma)", color: 0x86efac },
+  { id: "redis", flag: "--redis", label: "Redis", color: 0xf87171 },
+  { id: "kafka", flag: "--kafka", label: "Kafka", color: 0xe2e8f0 },
+  { id: "rabbitmq", flag: "--rabbitmq", label: "RabbitMQ", color: 0xfb923c },
+  { id: "asynq", flag: "--asynq", label: "Asynq", color: 0xfacc15 },
+  { id: "river", flag: "--river", label: "River", color: 0x22d3ee },
+  { id: "watermill", flag: "--watermill", label: "Watermill", color: 0xa5b4fc },
+  { id: "keyvault", flag: "--key-vault", label: "Key Vault", color: 0x60a5fa },
+];
+
+export const frameworkColor: Record<Framework, number> = {
+  gin: 0x38bdf8,
+  echo: 0xc4b5fd,
+  chi: 0xfdba74,
+};
+
+export const databaseColor: Record<Database, number> = {
+  postgres: 0x60a5fa,
+  mysql: 0xfbbf24,
+  mongodb: 0x34d399,
+  none: 0x64748b,
+};
+
+export interface Config {
+  framework: Framework;
+  database: Database;
+  extras: string[];
+}
+
+// Same rules as normalizeFeatures: asynq turns on redis; river needs postgres;
+// watermill needs kafka, rabbitmq or redis.
+export function normalize(c: Config): Config {
+  const on = new Set(c.extras);
+  if (on.has("asynq")) on.add("redis");
+  if (c.database !== "postgres") on.delete("river");
+  if (on.has("watermill") && !["kafka", "rabbitmq", "redis"].some((k) => on.has(k))) {
+    on.delete("watermill");
+  }
+  return { ...c, extras: extras.map((e) => e.id).filter((id) => on.has(id)) };
+}
+
+export function command(c: Config, name = "my-api"): string {
+  const parts = ["krok new", name, `-f ${c.framework}`, `-d ${c.database}`];
+  for (const e of extras) if (c.extras.includes(e.id)) parts.push(e.flag);
+  return parts.join(" ");
+}
