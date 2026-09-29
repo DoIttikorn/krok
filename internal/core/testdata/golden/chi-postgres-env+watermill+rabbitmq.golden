@@ -1082,6 +1082,8 @@ func TestMemoryStoreErrors(t *testing.T) {
 }
 -- internal/rabbitmq/rabbitmq.go --
 // Package rabbitmq publishes and consumes RabbitMQ messages with amqp091-go.
+// amqp091-go does not reconnect on its own, so both sides here do: the
+// Client reconnects on its next use, and RunWorker reconnects with backoff.
 package rabbitmq
 
 import (
@@ -1090,6 +1092,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -1100,19 +1103,40 @@ func URL() string { return getenv("RABBITMQ_URL", "amqp://app:secret@localhost:5
 // Queue is the example queue: RABBITMQ_QUEUE, default "events".
 func Queue() string { return getenv("RABBITMQ_QUEUE", "events") }
 
-// Client publishes messages over one connection and channel.
+// dialTimeout bounds each connection attempt, so a health check can't hang.
+const dialTimeout = 5 * time.Second
+
+func dial() (*amqp.Connection, error) {
+	return amqp.DialConfig(URL(), amqp.Config{Dial: amqp.DefaultDial(dialTimeout)})
+}
+
+// Client publishes messages. It connects on first use and reconnects after
+// the connection drops, so /readyz recovers once RabbitMQ is back instead of
+// keeping the pod out of the Service.
 type Client struct {
+	mu   sync.Mutex // guards conn and ch; amqp channels aren't safe for concurrent use
 	conn *amqp.Connection
-	mu   sync.Mutex // amqp channels are not safe for concurrent use
 	ch   *amqp.Channel
 }
 
-// New connects to RabbitMQ. Unlike the other clients it dials right away,
-// so the app fails fast if RabbitMQ is unreachable. It does not reconnect;
-// if the connection drops, /health reports it and your orchestrator should
-// restart the pod.
+// New validates RABBITMQ_URL. It does not connect yet.
 func New() (*Client, error) {
-	conn, err := amqp.Dial(URL())
+	if _, err := amqp.ParseURI(URL()); err != nil {
+		return nil, err
+	}
+	return &Client{}, nil
+}
+
+// channel returns an open channel, reconnecting if needed. c.mu must be held.
+func (c *Client) channel() (*amqp.Channel, error) {
+	if c.ch != nil && !c.ch.IsClosed() {
+		return c.ch, nil
+	}
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn, c.ch = nil, nil
+	}
+	conn, err := dial()
 	if err != nil {
 		return nil, err
 	}
@@ -1121,63 +1145,101 @@ func New() (*Client, error) {
 		conn.Close()
 		return nil, err
 	}
-	return &Client{conn: conn, ch: ch}, nil
+	c.conn, c.ch = conn, ch
+	return ch, nil
 }
 
 // Publish sends a persistent message to queue, declaring it as durable first.
 func (c *Client) Publish(ctx context.Context, queue string, body []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := c.ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+	ch, err := c.channel()
+	if err != nil {
 		return err
 	}
-	return c.ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
+	if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+		return err
+	}
+	return ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		Body:         body,
 	})
 }
 
-// Check reports whether the connection is still open; /health uses it.
+// Check reports whether RabbitMQ is reachable, reconnecting if needed;
+// /readyz uses it.
 func (c *Client) Check(context.Context) error {
-	if c.conn.IsClosed() {
-		return errors.New("connection closed")
-	}
-	return nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.channel()
+	return err
 }
 
-func (c *Client) Close() error { return c.conn.Close() }
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
 
-// RunWorker consumes Queue() and logs each message until ctx is done. Replace
-// handleMessage with your own logic. cmd/worker calls it.
+// RunWorker consumes Queue() until ctx is done, reconnecting with backoff
+// when RabbitMQ goes away, so the other consumers in cmd/worker keep running.
+// Replace handleMessage with your own logic.
 func RunWorker(ctx context.Context) error {
-	conn, err := amqp.Dial(URL())
+	const maxBackoff = 30 * time.Second
+	backoff := time.Second
+	for {
+		connected, err := consume(ctx)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if connected {
+			backoff = time.Second
+		}
+		log.Printf("rabbitmq: %v; reconnecting in %s", err, backoff)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// consume runs one connection until it fails or ctx is done. connected
+// reports whether it got as far as consuming.
+func consume(ctx context.Context) (connected bool, err error) {
+	conn, err := dial()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 	ch, err := conn.Channel()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := ch.QueueDeclare(Queue(), true, false, false, false, nil); err != nil {
-		return err
+		return false, err
 	}
 	if err := ch.Qos(10, 0, false); err != nil {
-		return err
+		return false, err
 	}
 	deliveries, err := ch.Consume(Queue(), "", false, false, false, false, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
+	log.Printf("rabbitmq: consuming %s", Queue())
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return true, nil
 		case d, ok := <-deliveries:
 			if !ok {
-				return errors.New("rabbitmq: delivery channel closed")
+				return true, errors.New("connection lost")
 			}
 			if err := handleMessage(ctx, d); err != nil {
 				log.Printf("rabbitmq: handle message: %v", err)

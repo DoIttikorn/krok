@@ -8,6 +8,13 @@ may change them.
 
 - Moved `core` to `internal/core`. krok is a command, not a library, so other
   modules can no longer import it and it can change in any release.
+- RabbitMQ: the client now connects lazily and reconnects, so `/readyz`
+  recovers after a RabbitMQ restart instead of keeping every API pod out of
+  the Service; the worker reconnects with backoff instead of exiting and
+  stopping the other consumers.
+- Docker images of Gin projects run with `GIN_MODE=release`.
+- MySQL's Docker Compose healthcheck pings over TCP, so it no longer passes
+  while the entrypoint's temporary init server is running.
 
 ## v0.1.0
 
