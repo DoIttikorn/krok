@@ -62,7 +62,7 @@ COPY --from=build /out/api /api
 EXPOSE 8080
 ENTRYPOINT ["/api"]
 -- Makefile --
-.PHONY: run watch build test tidy clean docker-build up down logs k8s k8s-apply
+.PHONY: run watch build test test-integration tidy clean docker-build up down logs k8s k8s-apply
 
 IMAGE := my-api
 
@@ -81,6 +81,11 @@ build:
 
 test:
 	go test ./...
+
+# Runs the repository contract against the real database too. Start it
+# first with "make deps-up".
+test-integration:
+	INTEGRATION=1 go test ./...
 
 tidy:
 	go mod tidy
@@ -162,10 +167,30 @@ Errors use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details
 (`application/problem+json`): `400` for malformed JSON, `404` for unknown IDs,
 `422` for invalid input.
 
-`items` is an example resource kept **in memory** (`internal/items`): each
-replica has its own copy. Implement `items.Store` with your database before
-running more than one replica, then use it as a template for your own
-resources.
+## Domains: ports and adapters
+
+`items` is an example domain. Copy its layout for your own, e.g.
+`internal/order`:
+
+```
+internal/items/
+├── items.go          model, errors, input validation
+├── service.go        business rules (Service)
+├── repository.go     Repository interface: the only view of storage
+├── memory/           in-process adapter; also the test double
+├── itemstest/        contract every Repository adapter must pass
+└── handler/          REST adapter
+```
+
+- The domain package imports no database driver and no web framework.
+  Adapters import the domain, never the other way round.
+- `internal/server/server.go` is the one place that picks adapters: it
+  builds the memory repository and hands it to `items.NewService`.
+- Service tests run against the memory adapter. That is safe because every
+  adapter passes the same contract in `itemstest`: `make test` runs it for
+  memory.
+- The memory adapter keeps items per process and loses them on restart, so
+  choose a database before running more than one replica.
 
 ## Make targets
 
@@ -175,6 +200,7 @@ resources.
 | `make watch` | Run with live reload ([air](https://github.com/air-verse/air), config in `.air.toml`) |
 | `make build` | Build every command into `bin/` |
 | `make test` | Run tests |
+| `make test-integration` | Run tests, including the repository contract against the real database (`make deps-up` first) |
 | `make tidy` | Tidy `go.mod` |
 | `make clean` | Remove build output |
 | `make docker-build` | Build the Docker image `my-api` |
@@ -649,23 +675,224 @@ func TestLoadRequiresVaultName(t *testing.T) {
 		t.Fatalf("err = %v, want AZURE_KEY_VAULT_NAME is not set", err)
 	}
 }
+-- internal/httpx/httpx.go --
+// Package httpx has the JSON helpers every HTTP handler shares. Errors are
+// RFC 9457 problem details (application/problem+json).
+package httpx
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+)
+
+// ErrBadRequest marks errors caused by a malformed request.
+var ErrBadRequest = errors.New("bad request")
+
+// MaxBodyBytes limits the request bodies DecodeJSON reads.
+const MaxBodyBytes = 1 << 20
+
+// DecodeJSON reads a JSON request body into v and rejects unknown fields.
+// Its errors wrap ErrBadRequest.
+func DecodeJSON(r *http.Request, v any) error {
+	dec := json.NewDecoder(io.LimitReader(r.Body, MaxBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("%w: invalid JSON body: %v", ErrBadRequest, err)
+	}
+	return nil
+}
+
+// JSON writes v with the given status.
+func JSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+
+// Problem is an RFC 9457 error response body.
+type Problem struct {
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// WriteProblem writes a problem response. Pass an empty detail for server
+// errors, so internals don't leak to clients.
+func WriteProblem(w http.ResponseWriter, status int, detail string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	p := Problem{Title: http.StatusText(status), Status: status, Detail: detail}
+	if err := json.NewEncoder(w).Encode(p); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+-- internal/items/handler/handler.go --
+// Package handler is the REST adapter for the items domain: it turns HTTP
+// requests into Service calls and domain errors into RFC 9457 responses.
+package handler
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+
+	"github.com/labstack/echo/v5"
+
+	"github.com/example/my-api/internal/httpx"
+	"github.com/example/my-api/internal/items"
+)
+
+// Service is the slice of items.Service these endpoints need. It is declared
+// here, where it is used, so handler tests can pass a fake.
+type Service interface {
+	List(ctx context.Context) ([]items.Item, error)
+	Get(ctx context.Context, id string) (items.Item, error)
+	Create(ctx context.Context, in items.Input) (items.Item, error)
+	Update(ctx context.Context, id string, in items.Input) (items.Item, error)
+	Delete(ctx context.Context, id string) error
+}
+
+// BasePath is where the server mounts these routes.
+const BasePath = "/api/v1/items"
+
+// Handler serves BasePath.
+type Handler struct {
+	svc Service
+}
+
+func New(svc Service) *Handler { return &Handler{svc: svc} }
+
+// itemList is the body of GET BasePath. An object rather than a bare
+// array leaves room for pagination fields later.
+type itemList struct {
+	Items []items.Item `json:"items"`
+}
+
+// fail writes the problem response that matches err. Unexpected errors are
+// logged, and their details are not sent to the client.
+func fail(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, httpx.ErrBadRequest):
+		httpx.WriteProblem(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, items.ErrNotFound):
+		httpx.WriteProblem(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, items.ErrInvalid):
+		httpx.WriteProblem(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		log.Printf("items: %v", err)
+		httpx.WriteProblem(w, http.StatusInternalServerError, "")
+	}
+}
+
+// Register mounts the routes on g, e.g. e.Group(handler.BasePath).
+func (h *Handler) Register(g *echo.Group) {
+	g.GET("", h.list)
+	g.POST("", h.create)
+	g.GET("/:id", h.get)
+	g.PUT("/:id", h.update)
+	g.DELETE("/:id", h.delete)
+}
+
+// Errors are written with fail, so the handlers return nil after it.
+
+func (h *Handler) list(c *echo.Context) error {
+	list, err := h.svc.List(c.Request().Context())
+	if err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	return c.JSON(http.StatusOK, itemList{Items: list})
+}
+
+func (h *Handler) create(c *echo.Context) error {
+	var in items.Input
+	if err := httpx.DecodeJSON(c.Request(), &in); err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	it, err := h.svc.Create(c.Request().Context(), in)
+	if err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	c.Response().Header().Set("Location", BasePath+"/"+it.ID)
+	return c.JSON(http.StatusCreated, it)
+}
+
+func (h *Handler) get(c *echo.Context) error {
+	it, err := h.svc.Get(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	return c.JSON(http.StatusOK, it)
+}
+
+func (h *Handler) update(c *echo.Context) error {
+	var in items.Input
+	if err := httpx.DecodeJSON(c.Request(), &in); err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	it, err := h.svc.Update(c.Request().Context(), c.Param("id"), in)
+	if err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	return c.JSON(http.StatusOK, it)
+}
+
+func (h *Handler) delete(c *echo.Context) error {
+	if err := h.svc.Delete(c.Request().Context(), c.Param("id")); err != nil {
+		fail(c.Response(), err)
+		return nil
+	}
+	return c.NoContent(http.StatusNoContent)
+}
 -- internal/items/items.go --
-// Package items is an example REST resource: the model, the Store interface
-// the handlers depend on, and an in-memory Store. Replace MemoryStore with a
-// database-backed Store; the handlers don't change.
+// Package items is an example domain, laid out as ports and adapters:
+//
+//   - this package holds the model, the business rules (Service) and the
+//     Repository interface the rules need. It imports no database driver
+//     and no web framework;
+//   - adapters live in sub-packages and depend on this one: memory
+//     (in-process, also the test double), and handler (the
+//     REST endpoints);
+//   - itemstest is the contract every Repository must pass, so any
+//     adapter can replace another without changing the service.
+//
+// Copy this layout for your own domains, e.g. internal/order.
 package items
 
 import (
-	"cmp"
-	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
-	"sync"
 	"time"
 )
+
+// Item is the domain model returned by the API.
+type Item struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Input is what a client sends to create or replace an item.
+type Input struct {
+	Name string `json:"name"`
+}
+
+// MaxNameLength is the longest name the service accepts, in bytes.
+const MaxNameLength = 200
 
 var (
 	// ErrNotFound is returned when no item has the requested ID.
@@ -674,33 +901,285 @@ var (
 	ErrInvalid = errors.New("invalid item")
 )
 
-// Item is the resource returned by the API.
-type Item struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-// Input is the request body to create or replace an item.
-type Input struct {
-	Name string `json:"name"`
-}
-
 // Validate reports whether in can be stored.
 func (in Input) Validate() error {
 	name := strings.TrimSpace(in.Name)
 	switch {
 	case name == "":
 		return fmt.Errorf("%w: name is required", ErrInvalid)
-	case len(name) > 200:
-		return fmt.Errorf("%w: name must be at most 200 characters", ErrInvalid)
+	case len(name) > MaxNameLength:
+		return fmt.Errorf("%w: name must be at most %d bytes", ErrInvalid, MaxNameLength)
 	}
 	return nil
 }
+-- internal/items/itemstest/itemstest.go --
+// Package itemstest is the contract every items.Repository must pass.
+//
+// The service is tested against the memory adapter, which is only safe if
+// every other adapter behaves the same way. Each adapter's tests call Run:
+// memory in ordinary unit tests, the database adapters against a real
+// database (INTEGRATION=1).
+package itemstest
 
-// Store persists items.
-type Store interface {
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/example/my-api/internal/items"
+)
+
+// Run checks the Repository contract. newRepo must return an empty
+// repository on every call.
+func Run(t *testing.T, newRepo func(t *testing.T) items.Repository) {
+	ctx := context.Background()
+	// Millisecond precision, like the service, so every store keeps it exactly.
+	base := time.Date(2026, 1, 2, 3, 4, 5, 6_000_000, time.UTC)
+	item := func(id, name string, created time.Time) items.Item {
+		return items.Item{ID: id, Name: name, CreatedAt: created, UpdatedAt: created}
+	}
+
+	t.Run("insert then get", func(t *testing.T) {
+		r := newRepo(t)
+		want := item("a", "first", base)
+		mustInsert(t, r, want)
+		got, err := r.ByID(ctx, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertItem(t, got, want)
+	})
+
+	t.Run("get missing is ErrNotFound", func(t *testing.T) {
+		if _, err := newRepo(t).ByID(ctx, "missing"); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("list is oldest first", func(t *testing.T) {
+		r := newRepo(t)
+		mustInsert(t, r, item("c", "third", base.Add(2*time.Second)))
+		mustInsert(t, r, item("a", "first", base))
+		mustInsert(t, r, item("b", "second", base.Add(time.Second)))
+		list, err := r.List(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, it := range list {
+			ids = append(ids, it.ID)
+		}
+		if len(ids) != 3 || ids[0] != "a" || ids[1] != "b" || ids[2] != "c" {
+			t.Errorf("List IDs = %v, want [a b c]", ids)
+		}
+	})
+
+	t.Run("list empty", func(t *testing.T) {
+		list, err := newRepo(t).List(ctx)
+		if err != nil || len(list) != 0 {
+			t.Errorf("List = %v, %v; want no items", list, err)
+		}
+	})
+
+	t.Run("update changes name and UpdatedAt only", func(t *testing.T) {
+		r := newRepo(t)
+		mustInsert(t, r, item("a", "first", base))
+		changed := items.Item{ID: "a", Name: "renamed", CreatedAt: base.Add(time.Hour), UpdatedAt: base.Add(time.Minute)}
+		if err := r.Update(ctx, changed); err != nil {
+			t.Fatal(err)
+		}
+		got, err := r.ByID(ctx, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertItem(t, got, items.Item{ID: "a", Name: "renamed", CreatedAt: base, UpdatedAt: base.Add(time.Minute)})
+	})
+
+	t.Run("update with unchanged values", func(t *testing.T) {
+		r := newRepo(t)
+		it := item("a", "first", base)
+		mustInsert(t, r, it)
+		if err := r.Update(ctx, it); err != nil {
+			t.Errorf("err = %v, want nil: the item exists even if nothing changed", err)
+		}
+	})
+
+	t.Run("update missing is ErrNotFound", func(t *testing.T) {
+		if err := newRepo(t).Update(ctx, item("missing", "x", base)); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		r := newRepo(t)
+		mustInsert(t, r, item("a", "first", base))
+		if err := r.Delete(ctx, "a"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ByID(ctx, "a"); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("ByID after Delete: err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("delete missing is ErrNotFound", func(t *testing.T) {
+		if err := newRepo(t).Delete(ctx, "missing"); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func mustInsert(t *testing.T, r items.Repository, it items.Item) {
+	t.Helper()
+	if err := r.Insert(context.Background(), it); err != nil {
+		t.Fatalf("Insert(%s): %v", it.ID, err)
+	}
+}
+
+func assertItem(t *testing.T, got, want items.Item) {
+	t.Helper()
+	if got.ID != want.ID || got.Name != want.Name ||
+		!got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
+-- internal/items/memory/memory.go --
+// Package memory is an in-process items.Repository. It backs the service
+// when there is no database, and it is the test double for the service:
+// it passes the same contract as the database adapters.
+//
+// Each process has its own copy and everything is lost on restart, so it
+// is not for production.
+package memory
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+
+	"github.com/example/my-api/internal/items"
+)
+
+// Repository is safe for concurrent use.
+type Repository struct {
+	mu    sync.RWMutex
+	items map[string]items.Item
+}
+
+var _ items.Repository = (*Repository)(nil)
+
+func New() *Repository {
+	return &Repository{items: map[string]items.Item{}}
+}
+
+func (r *Repository) List(ctx context.Context) ([]items.Item, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]items.Item, 0, len(r.items))
+	for _, it := range r.items {
+		out = append(out, it)
+	}
+	slices.SortFunc(out, func(a, b items.Item) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+	})
+	return out, nil
+}
+
+func (r *Repository) ByID(ctx context.Context, id string) (items.Item, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	it, ok := r.items[id]
+	if !ok {
+		return items.Item{}, fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	return it, nil
+}
+
+func (r *Repository) Insert(ctx context.Context, it items.Item) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.items[it.ID] = it
+	return nil
+}
+
+func (r *Repository) Update(ctx context.Context, it items.Item) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur, ok := r.items[it.ID]
+	if !ok {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, it.ID)
+	}
+	cur.Name, cur.UpdatedAt = it.Name, it.UpdatedAt
+	r.items[it.ID] = cur
+	return nil
+}
+
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.items[id]; !ok {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	delete(r.items, id)
+	return nil
+}
+-- internal/items/memory/memory_test.go --
+package memory_test
+
+import (
+	"testing"
+
+	"github.com/example/my-api/internal/items"
+	"github.com/example/my-api/internal/items/itemstest"
+	"github.com/example/my-api/internal/items/memory"
+)
+
+func TestContract(t *testing.T) {
+	itemstest.Run(t, func(t *testing.T) items.Repository { return memory.New() })
+}
+-- internal/items/repository.go --
+package items
+
+import "context"
+
+// Repository is the persistence port: the service's only view of storage.
+//
+// It is declared here, next to the service that uses it, so the domain
+// never depends on a database. Every implementation must pass the contract
+// in itemstest; that is what makes adapters interchangeable.
+type Repository interface {
+	// List returns every item, oldest first (by CreatedAt, then ID).
+	List(ctx context.Context) ([]Item, error)
+
+	// ByID returns one item, or an error wrapping ErrNotFound.
+	ByID(ctx context.Context, id string) (Item, error)
+
+	// Insert stores a new item. The service has already set every field.
+	Insert(ctx context.Context, it Item) error
+
+	// Update replaces the name and UpdatedAt of an existing item, or returns
+	// an error wrapping ErrNotFound.
+	Update(ctx context.Context, it Item) error
+
+	// Delete removes an item, or returns an error wrapping ErrNotFound.
+	Delete(ctx context.Context, id string) error
+}
+-- internal/items/service.go --
+package items
+
+import (
+	"context"
+	"crypto/rand"
+	"strings"
+	"time"
+)
+
+// Service is everything the items domain can do. Handlers depend on it,
+// never on a Repository directly.
+type Service interface {
 	List(ctx context.Context) ([]Item, error)
 	Get(ctx context.Context, id string) (Item, error)
 	Create(ctx context.Context, in Input) (Item, error)
@@ -708,133 +1187,139 @@ type Store interface {
 	Delete(ctx context.Context, id string) error
 }
 
-// MemoryStore keeps items in memory. Each replica has its own copy and
-// everything is lost on restart, so it is only for trying the API out.
-type MemoryStore struct {
-	mu    sync.RWMutex
-	items map[string]Item
+type service struct {
+	repo Repository
+	now  func() time.Time
 }
 
-func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{items: map[string]Item{}}
+var _ Service = (*service)(nil)
+
+// NewService wires the domain to a Repository adapter.
+func NewService(repo Repository) Service {
+	return &service{repo: repo, now: now}
 }
 
-// List returns every item, oldest first.
-func (s *MemoryStore) List(ctx context.Context) ([]Item, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Item, 0, len(s.items))
-	for _, it := range s.items {
-		out = append(out, it)
+// now is truncated to milliseconds, the finest precision every supported
+// store keeps, so an item reads back exactly as it was written.
+func now() time.Time { return time.Now().UTC().Truncate(time.Millisecond) }
+
+// newID returns a random ID. It is minted here rather than by the store, so
+// its format doesn't depend on which database is behind the Repository.
+func newID() string { return rand.Text() }
+
+func (s *service) List(ctx context.Context) ([]Item, error) {
+	list, err := s.repo.List(ctx)
+	if list == nil && err == nil {
+		list = []Item{} // encode as [] rather than null
 	}
-	slices.SortFunc(out, func(a, b Item) int {
-		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
-	})
-	return out, nil
+	return list, err
 }
 
-func (s *MemoryStore) Get(ctx context.Context, id string) (Item, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	it, ok := s.items[id]
-	if !ok {
-		return Item{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+func (s *service) Get(ctx context.Context, id string) (Item, error) {
+	return s.repo.ByID(ctx, id)
+}
+
+func (s *service) Create(ctx context.Context, in Input) (Item, error) {
+	if err := in.Validate(); err != nil {
+		return Item{}, err
+	}
+	t := s.now()
+	it := Item{ID: newID(), Name: strings.TrimSpace(in.Name), CreatedAt: t, UpdatedAt: t}
+	if err := s.repo.Insert(ctx, it); err != nil {
+		return Item{}, err
 	}
 	return it, nil
 }
 
-func (s *MemoryStore) Create(ctx context.Context, in Input) (Item, error) {
+func (s *service) Update(ctx context.Context, id string, in Input) (Item, error) {
 	if err := in.Validate(); err != nil {
 		return Item{}, err
 	}
-	now := time.Now().UTC()
-	it := Item{ID: rand.Text(), Name: strings.TrimSpace(in.Name), CreatedAt: now, UpdatedAt: now}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.items[it.ID] = it
-	return it, nil
-}
-
-func (s *MemoryStore) Update(ctx context.Context, id string, in Input) (Item, error) {
-	if err := in.Validate(); err != nil {
+	it, err := s.repo.ByID(ctx, id)
+	if err != nil {
 		return Item{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	it, ok := s.items[id]
-	if !ok {
-		return Item{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	it.Name = strings.TrimSpace(in.Name)
-	it.UpdatedAt = time.Now().UTC()
-	s.items[id] = it
+	it.UpdatedAt = s.now()
+	if err := s.repo.Update(ctx, it); err != nil {
+		return Item{}, err
+	}
 	return it, nil
 }
 
-func (s *MemoryStore) Delete(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.items[id]; !ok {
-		return fmt.Errorf("%w: %s", ErrNotFound, id)
-	}
-	delete(s.items, id)
-	return nil
+func (s *service) Delete(ctx context.Context, id string) error {
+	return s.repo.Delete(ctx, id)
 }
--- internal/items/items_test.go --
-package items
+-- internal/items/service_test.go --
+package items_test
 
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/example/my-api/internal/items"
+	"github.com/example/my-api/internal/items/memory"
 )
 
-func TestMemoryStore(t *testing.T) {
+// The service is tested against the memory adapter. It passes the same
+// contract as the real one (see itemstest), so no database is needed here.
+func newService() items.Service { return items.NewService(memory.New()) }
+
+func TestCreateTrimsAndStamps(t *testing.T) {
 	ctx := context.Background()
-	s := NewMemoryStore()
+	svc := newService()
 
-	created, err := s.Create(ctx, Input{Name: "  first  "})
+	it, err := svc.Create(ctx, items.Input{Name: "  first  "})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.ID == "" || created.Name != "first" {
-		t.Fatalf("Create = %+v, want an ID and a trimmed name", created)
+	if it.ID == "" || it.Name != "first" {
+		t.Errorf("Create = %+v, want an ID and a trimmed name", it)
 	}
-
-	updated, err := s.Update(ctx, created.ID, Input{Name: "renamed"})
-	if err != nil {
-		t.Fatal(err)
+	if it.CreatedAt.IsZero() || !it.CreatedAt.Equal(it.UpdatedAt) {
+		t.Errorf("timestamps = %v / %v, want equal and set", it.CreatedAt, it.UpdatedAt)
 	}
-	if updated.Name != "renamed" || !updated.CreatedAt.Equal(created.CreatedAt) {
-		t.Errorf("Update = %+v, want new name and unchanged CreatedAt", updated)
-	}
-
-	list, err := s.List(ctx)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("List = %v, %v; want one item", list, err)
-	}
-
-	if err := s.Delete(ctx, created.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Get(ctx, created.ID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("Get after Delete: err = %v, want ErrNotFound", err)
+	got, err := svc.Get(ctx, it.ID)
+	if err != nil || got != it {
+		t.Errorf("Get = %+v, %v; want %+v", got, err, it)
 	}
 }
 
-func TestMemoryStoreErrors(t *testing.T) {
+func TestUpdateKeepsCreatedAt(t *testing.T) {
 	ctx := context.Background()
-	s := NewMemoryStore()
-
-	if _, err := s.Create(ctx, Input{Name: "   "}); !errors.Is(err, ErrInvalid) {
-		t.Errorf("Create blank name: err = %v, want ErrInvalid", err)
+	svc := newService()
+	it, err := svc.Create(ctx, items.Input{Name: "first"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := s.Update(ctx, "missing", Input{Name: "x"}); !errors.Is(err, ErrNotFound) {
+	updated, err := svc.Update(ctx, it.ID, items.Input{Name: "renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "renamed" || !updated.CreatedAt.Equal(it.CreatedAt) {
+		t.Errorf("Update = %+v, want new name and the original CreatedAt", updated)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+	for _, name := range []string{"", "   ", strings.Repeat("x", items.MaxNameLength+1)} {
+		if _, err := svc.Create(ctx, items.Input{Name: name}); !errors.Is(err, items.ErrInvalid) {
+			t.Errorf("Create(%q): err = %v, want ErrInvalid", name, err)
+		}
+	}
+	if _, err := svc.Update(ctx, "missing", items.Input{Name: "x"}); !errors.Is(err, items.ErrNotFound) {
 		t.Errorf("Update missing: err = %v, want ErrNotFound", err)
 	}
-	if err := s.Delete(ctx, "missing"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("Delete missing: err = %v, want ErrNotFound", err)
+}
+
+func TestListIsNeverNil(t *testing.T) {
+	list, err := newService().List(context.Background())
+	if err != nil || list == nil {
+		t.Errorf("List = %#v, %v; want an empty, non-nil slice", list, err)
 	}
 }
 -- internal/server/health.go --
@@ -842,17 +1327,18 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/example/my-api/internal/httpx"
 )
 
 // livez is the liveness probe. It only reports that the process can serve
 // HTTP and deliberately ignores dependencies: if it failed during a database
 // outage, Kubernetes would restart every pod at once and make things worse.
 func (s *Server) livez(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "up"})
+	httpx.JSON(w, http.StatusOK, map[string]string{"status": "up"})
 }
 
 // readyz is the readiness probe. It fails while the server is shutting down
@@ -860,17 +1346,17 @@ func (s *Server) livez(w http.ResponseWriter, r *http.Request) {
 // without restarting it.
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	if s.draining.Load() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "shutting down"})
+		httpx.JSON(w, http.StatusServiceUnavailable, map[string]string{"status": "shutting down"})
 		return
 	}
 	code, res := s.health(r.Context())
-	writeJSON(w, code, res)
+	httpx.JSON(w, code, res)
 }
 
 // healthz reports each dependency, for people and monitoring.
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	code, res := s.health(r.Context())
-	writeJSON(w, code, res)
+	httpx.JSON(w, code, res)
 }
 
 // health runs every check and reports each one as "up" or "down", plus the
@@ -891,14 +1377,6 @@ func (s *Server) health(ctx context.Context) (int, map[string]string) {
 		res[name] = "up"
 	}
 	return code, res
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("write response: %v", err)
-	}
 }
 -- internal/server/health_test.go --
 package server
@@ -951,81 +1429,6 @@ func TestReadyzFailsWhileDraining(t *testing.T) {
 	if rec := do(t, h, http.MethodGet, "/livez", "", nil); rec.Code != http.StatusOK {
 		t.Errorf("GET /livez = %d, want %d", rec.Code, http.StatusOK)
 	}
-}
--- internal/server/items.go --
-package server
-
-import (
-	"net/http"
-
-	"github.com/labstack/echo/v5"
-
-	"github.com/example/my-api/internal/items"
-)
-
-func (s *Server) itemRoutes(g *echo.Group) {
-	g.GET("", s.listItems)
-	g.POST("", s.createItem)
-	g.GET("/:id", s.getItem)
-	g.PUT("/:id", s.updateItem)
-	g.DELETE("/:id", s.deleteItem)
-}
-
-// Errors are written with writeProblem, so handlers return nil after it.
-
-func (s *Server) listItems(c *echo.Context) error {
-	list, err := s.items.List(c.Request().Context())
-	if err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	return c.JSON(http.StatusOK, itemList{Items: list})
-}
-
-func (s *Server) createItem(c *echo.Context) error {
-	var in items.Input
-	if err := decodeJSON(c.Request(), &in); err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	it, err := s.items.Create(c.Request().Context(), in)
-	if err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	c.Response().Header().Set("Location", "/api/v1/items/"+it.ID)
-	return c.JSON(http.StatusCreated, it)
-}
-
-func (s *Server) getItem(c *echo.Context) error {
-	it, err := s.items.Get(c.Request().Context(), c.Param("id"))
-	if err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	return c.JSON(http.StatusOK, it)
-}
-
-func (s *Server) updateItem(c *echo.Context) error {
-	var in items.Input
-	if err := decodeJSON(c.Request(), &in); err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	it, err := s.items.Update(c.Request().Context(), c.Param("id"), in)
-	if err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	return c.JSON(http.StatusOK, it)
-}
-
-func (s *Server) deleteItem(c *echo.Context) error {
-	if err := s.items.Delete(c.Request().Context(), c.Param("id")); err != nil {
-		writeProblem(c.Response(), err)
-		return nil
-	}
-	return c.NoContent(http.StatusNoContent)
 }
 -- internal/server/items_test.go --
 package server
@@ -1101,74 +1504,6 @@ func TestItemsAPIValidation(t *testing.T) {
 		t.Errorf("POST malformed JSON = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
--- internal/server/respond.go --
-package server
-
-import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-
-	"github.com/example/my-api/internal/items"
-)
-
-// errBadRequest marks errors caused by a malformed request.
-var errBadRequest = errors.New("bad request")
-
-// maxBodyBytes limits the request bodies decodeJSON reads.
-const maxBodyBytes = 1 << 20
-
-// decodeJSON reads a JSON request body into v and rejects unknown fields.
-func decodeJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("%w: invalid JSON body: %v", errBadRequest, err)
-	}
-	return nil
-}
-
-// itemList is the response body of GET /api/v1/items. An object rather than
-// a bare array leaves room for pagination fields later.
-type itemList struct {
-	Items []items.Item `json:"items"`
-}
-
-// problem is an RFC 9457 error response body.
-type problem struct {
-	Title  string `json:"title"`
-	Status int    `json:"status"`
-	Detail string `json:"detail,omitempty"`
-}
-
-// writeProblem answers with the problem that matches err. Unexpected errors
-// are logged and their details are not sent to the client.
-func writeProblem(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	switch {
-	case errors.Is(err, errBadRequest):
-		status = http.StatusBadRequest
-	case errors.Is(err, items.ErrNotFound):
-		status = http.StatusNotFound
-	case errors.Is(err, items.ErrInvalid):
-		status = http.StatusUnprocessableEntity
-	}
-	p := problem{Title: http.StatusText(status), Status: status}
-	if status == http.StatusInternalServerError {
-		log.Printf("internal error: %v", err)
-	} else {
-		p.Detail = err.Error()
-	}
-
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(p); err != nil {
-		log.Printf("write response: %v", err)
-	}
-}
 -- internal/server/routes.go --
 package server
 
@@ -1176,6 +1511,8 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
 	"net/http"
+
+	itemshandler "github.com/example/my-api/internal/items/handler"
 )
 
 // RegisterRoutes returns the router with every API route mounted. The
@@ -1185,7 +1522,7 @@ func (s *Server) RegisterRoutes() http.Handler {
 	e.Use(middleware.RequestLogger(), middleware.Recover())
 
 	e.GET("/", s.helloHandler)
-	s.itemRoutes(e.Group("/api/v1/items"))
+	itemshandler.New(s.items).Register(e.Group(itemshandler.BasePath))
 
 	return e
 }
@@ -1204,12 +1541,13 @@ import (
 	"testing"
 
 	"github.com/example/my-api/internal/items"
+	"github.com/example/my-api/internal/items/memory"
 )
 
 // newTestServer returns a Server without external dependencies, so every
-// health check passes.
+// health check passes. Items are kept by the memory adapter.
 func newTestServer() *Server {
-	return &Server{items: items.NewMemoryStore()}
+	return &Server{items: items.NewService(memory.New())}
 }
 
 // do sends a request through the full handler and decodes a JSON response
@@ -1253,6 +1591,7 @@ import (
 	"time"
 
 	"github.com/example/my-api/internal/items"
+	itemstore "github.com/example/my-api/internal/items/memory"
 )
 
 // Server is the HTTP server and the dependencies its handlers need.
@@ -1265,7 +1604,7 @@ type Server struct {
 	// checks are run by /readyz and /health, keyed by the name shown in the
 	// response.
 	checks map[string]func(context.Context) error
-	items  items.Store
+	items  items.Service
 }
 
 // New connects the dependencies and builds the HTTP server. Call Close when
@@ -1278,10 +1617,14 @@ func New(ctx context.Context) (*Server, error) {
 	s := &Server{
 		shutdownDelay: delay,
 		checks:        map[string]func(context.Context) error{},
-		// In memory, so every replica has its own items. Swap in a
-		// database-backed items.Store before running more than one replica.
-		items: items.NewMemoryStore(),
 	}
+
+	// Composition root: pick each domain's adapters here. The domain packages
+	// only know their Repository interface.
+	// In memory: each replica has its own items. Choose a database
+	// (krok new --database) before running more than one replica.
+	itemRepo := itemstore.New()
+	s.items = items.NewService(itemRepo)
 
 	s.srv = &http.Server{
 		Addr:              ":" + getenv("PORT", "8080"),

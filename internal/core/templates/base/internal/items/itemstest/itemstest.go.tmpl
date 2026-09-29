@@ -1,0 +1,130 @@
+// Package itemstest is the contract every items.Repository must pass.
+//
+// The service is tested against the memory adapter, which is only safe if
+// every other adapter behaves the same way. Each adapter's tests call Run:
+// memory in ordinary unit tests, the database adapters against a real
+// database (INTEGRATION=1).
+package itemstest
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// Run checks the Repository contract. newRepo must return an empty
+// repository on every call.
+func Run(t *testing.T, newRepo func(t *testing.T) items.Repository) {
+	ctx := context.Background()
+	// Millisecond precision, like the service, so every store keeps it exactly.
+	base := time.Date(2026, 1, 2, 3, 4, 5, 6_000_000, time.UTC)
+	item := func(id, name string, created time.Time) items.Item {
+		return items.Item{ID: id, Name: name, CreatedAt: created, UpdatedAt: created}
+	}
+
+	t.Run("insert then get", func(t *testing.T) {
+		r := newRepo(t)
+		want := item("a", "first", base)
+		mustInsert(t, r, want)
+		got, err := r.ByID(ctx, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertItem(t, got, want)
+	})
+
+	t.Run("get missing is ErrNotFound", func(t *testing.T) {
+		if _, err := newRepo(t).ByID(ctx, "missing"); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("list is oldest first", func(t *testing.T) {
+		r := newRepo(t)
+		mustInsert(t, r, item("c", "third", base.Add(2*time.Second)))
+		mustInsert(t, r, item("a", "first", base))
+		mustInsert(t, r, item("b", "second", base.Add(time.Second)))
+		list, err := r.List(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, it := range list {
+			ids = append(ids, it.ID)
+		}
+		if len(ids) != 3 || ids[0] != "a" || ids[1] != "b" || ids[2] != "c" {
+			t.Errorf("List IDs = %v, want [a b c]", ids)
+		}
+	})
+
+	t.Run("list empty", func(t *testing.T) {
+		list, err := newRepo(t).List(ctx)
+		if err != nil || len(list) != 0 {
+			t.Errorf("List = %v, %v; want no items", list, err)
+		}
+	})
+
+	t.Run("update changes name and UpdatedAt only", func(t *testing.T) {
+		r := newRepo(t)
+		mustInsert(t, r, item("a", "first", base))
+		changed := items.Item{ID: "a", Name: "renamed", CreatedAt: base.Add(time.Hour), UpdatedAt: base.Add(time.Minute)}
+		if err := r.Update(ctx, changed); err != nil {
+			t.Fatal(err)
+		}
+		got, err := r.ByID(ctx, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertItem(t, got, items.Item{ID: "a", Name: "renamed", CreatedAt: base, UpdatedAt: base.Add(time.Minute)})
+	})
+
+	t.Run("update with unchanged values", func(t *testing.T) {
+		r := newRepo(t)
+		it := item("a", "first", base)
+		mustInsert(t, r, it)
+		if err := r.Update(ctx, it); err != nil {
+			t.Errorf("err = %v, want nil: the item exists even if nothing changed", err)
+		}
+	})
+
+	t.Run("update missing is ErrNotFound", func(t *testing.T) {
+		if err := newRepo(t).Update(ctx, item("missing", "x", base)); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		r := newRepo(t)
+		mustInsert(t, r, item("a", "first", base))
+		if err := r.Delete(ctx, "a"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.ByID(ctx, "a"); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("ByID after Delete: err = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("delete missing is ErrNotFound", func(t *testing.T) {
+		if err := newRepo(t).Delete(ctx, "missing"); !errors.Is(err, items.ErrNotFound) {
+			t.Errorf("err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func mustInsert(t *testing.T, r items.Repository, it items.Item) {
+	t.Helper()
+	if err := r.Insert(context.Background(), it); err != nil {
+		t.Fatalf("Insert(%s): %v", it.ID, err)
+	}
+}
+
+func assertItem(t *testing.T, got, want items.Item) {
+	t.Helper()
+	if got.ID != want.ID || got.Name != want.Name ||
+		!got.CreatedAt.Equal(want.CreatedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}

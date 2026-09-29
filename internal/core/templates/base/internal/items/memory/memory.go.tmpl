@@ -1,0 +1,82 @@
+// Package memory is an in-process items.Repository. It backs the service
+// when there is no database, and it is the test double for the service:
+// it passes the same contract as the database adapters.
+//
+// Each process has its own copy and everything is lost on restart, so it
+// is not for production.
+package memory
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// Repository is safe for concurrent use.
+type Repository struct {
+	mu    sync.RWMutex
+	items map[string]items.Item
+}
+
+var _ items.Repository = (*Repository)(nil)
+
+func New() *Repository {
+	return &Repository{items: map[string]items.Item{}}
+}
+
+func (r *Repository) List(ctx context.Context) ([]items.Item, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]items.Item, 0, len(r.items))
+	for _, it := range r.items {
+		out = append(out, it)
+	}
+	slices.SortFunc(out, func(a, b items.Item) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+	})
+	return out, nil
+}
+
+func (r *Repository) ByID(ctx context.Context, id string) (items.Item, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	it, ok := r.items[id]
+	if !ok {
+		return items.Item{}, fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	return it, nil
+}
+
+func (r *Repository) Insert(ctx context.Context, it items.Item) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.items[it.ID] = it
+	return nil
+}
+
+func (r *Repository) Update(ctx context.Context, it items.Item) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur, ok := r.items[it.ID]
+	if !ok {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, it.ID)
+	}
+	cur.Name, cur.UpdatedAt = it.Name, it.UpdatedAt
+	r.items[it.ID] = cur
+	return nil
+}
+
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.items[id]; !ok {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	delete(r.items, id)
+	return nil
+}

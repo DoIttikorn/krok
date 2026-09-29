@@ -8,6 +8,8 @@ import (
 {{- end}}
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
+
+	itemshandler "{{.ModulePath}}/internal/items/handler"
 )
 
 // RegisterRoutes returns the router with every API route mounted. The
@@ -18,9 +20,10 @@ func (s *Server) RegisterRoutes() http.Handler {
 
 	e.GET("/", s.helloHandler)
 {{- if .Has "openapi"}}
-	s.registerItems(humaecho.New(e, apiConfig()))
+	api := humaecho.New(e, apiConfig())
+	itemshandler.New(s.items).Register(api)
 {{- else}}
-	s.itemRoutes(e.Group("/api/v1/items"))
+	itemshandler.New(s.items).Register(e.Group(itemshandler.BasePath))
 {{- end}}
 
 	return e

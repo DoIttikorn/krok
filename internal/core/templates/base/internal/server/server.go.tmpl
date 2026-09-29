@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"{{.ModulePath}}/internal/items"
+	itemstore "{{.ModulePath}}/internal/items/{{.ItemsStore}}"
 {{- if .HasDB}}
 
 	"{{.ModulePath}}/internal/database"
@@ -44,7 +45,7 @@ type Server struct {
 	// checks are run by /readyz and /health, keyed by the name shown in the
 	// response.
 	checks map[string]func(context.Context) error
-	items  items.Store
+	items  items.Service
 {{- if .HasDB}}
 	db     database.Service
 {{- end}}
@@ -78,9 +79,6 @@ func New(ctx context.Context) (*Server, error) {
 	s := &Server{
 		shutdownDelay: delay,
 		checks:        map[string]func(context.Context) error{},
-		// In memory, so every replica has its own items. Swap in a
-		// database-backed items.Store before running more than one replica.
-		items: items.NewMemoryStore(),
 	}
 {{- if .HasDeps}}
 	fail := func(what string, err error) (*Server, error) {
@@ -98,6 +96,20 @@ func New(ctx context.Context) (*Server, error) {
 	s.checks["database"] = db.Check
 	s.closers = append(s.closers, db.Close)
 {{- end}}
+
+	// Composition root: pick each domain's adapters here. The domain packages
+	// only know their Repository interface.
+{{- if .HasDB}}
+	itemRepo := itemstore.New(db.{{if eq .Database "mongodb"}}Database(){{else}}SQL(){{end}})
+	if err := itemRepo.Migrate(ctx); err != nil {
+		return fail("migrate items", err)
+	}
+{{- else}}
+	// In memory: each replica has its own items. Choose a database
+	// (krok new --database) before running more than one replica.
+	itemRepo := itemstore.New()
+{{- end}}
+	s.items = items.NewService(itemRepo)
 {{- if .Has "redis"}}
 
 	rdb, err := redis.New()

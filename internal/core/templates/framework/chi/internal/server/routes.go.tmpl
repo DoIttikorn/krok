@@ -8,6 +8,9 @@ import (
 {{- end}}
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"{{.ModulePath}}/internal/httpx"
+	itemshandler "{{.ModulePath}}/internal/items/handler"
 )
 
 // RegisterRoutes returns the router with every API route mounted. The
@@ -18,14 +21,15 @@ func (s *Server) RegisterRoutes() http.Handler {
 
 	r.Get("/", s.helloHandler)
 {{- if .Has "openapi"}}
-	s.registerItems(humachi.New(r, apiConfig()))
+	api := humachi.New(r, apiConfig())
+	itemshandler.New(s.items).Register(api)
 {{- else}}
-	r.Route("/api/v1/items", s.itemRoutes)
+	r.Route(itemshandler.BasePath, itemshandler.New(s.items).Register)
 {{- end}}
 
 	return r
 }
 
 func (s *Server) helloHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"message": "Hello World"})
+	httpx.JSON(w, http.StatusOK, map[string]string{"message": "Hello World"})
 }

@@ -48,15 +48,16 @@ type Plan struct {
 // TemplateData is the value templates are executed with.
 type TemplateData struct {
 	Options
-	HasDB     bool
-	KeyVault  bool     // Config is Azure Key Vault
-	DBName    string   // Name made safe for database identifiers, e.g. "my-api" → "my_api"
-	K8sName   string   // Name made safe for Kubernetes resource names, e.g. "My_API" → "my-api"
-	DBPort    string   // default port of the chosen database, "" without one
-	HasDeps   bool     // the server connects to at least one external service
-	HasWorker bool     // a feature needs cmd/worker to consume messages or run jobs
-	Services  []string // docker-compose services the app depends on, e.g. db, redis
-	Watermill string   // broker Watermill uses: kafka, rabbitmq or redis
+	HasDB      bool
+	KeyVault   bool     // Config is Azure Key Vault
+	DBName     string   // Name made safe for database identifiers, e.g. "my-api" → "my_api"
+	K8sName    string   // Name made safe for Kubernetes resource names, e.g. "My_API" → "my-api"
+	ItemsStore string   // adapter package for the items repository: the database ID, or "memory"
+	DBPort     string   // default port of the chosen database, "" without one
+	HasDeps    bool     // the server connects to at least one external service
+	HasWorker  bool     // a feature needs cmd/worker to consume messages or run jobs
+	Services   []string // docker-compose services the app depends on, e.g. db, redis
+	Watermill  string   // broker Watermill uses: kafka, rabbitmq or redis
 }
 
 // Has reports whether feature id is enabled: {{if .Has "redis"}}.
@@ -94,6 +95,10 @@ func NewTemplateData(o Options) TemplateData {
 		DBName:   dbName,
 		K8sName:  k8sName(o.Name),
 		DBPort:   dbPorts[o.Database],
+	}
+	d.ItemsStore = "memory"
+	if d.HasDB {
+		d.ItemsStore = o.Database
 	}
 	d.HasDeps = d.HasDB
 	for _, f := range []string{FeatureRedis, FeatureKafka, FeatureRabbitMQ, FeatureAsynq, FeatureRiver, FeatureWatermill} {
@@ -141,8 +146,9 @@ func BuildPlan(o Options) (Plan, error) {
 // path. A leading "dot_" in a file name becomes "." (dot_gitignore.tmpl →
 // .gitignore), so dotfiles don't affect this repository. Rendered .go files
 // are gofmt'ed. A template that renders to only whitespace produces no file,
-// so a file can be made conditional by wrapping it in {{if}}. Two layers
-// producing the same path is an error.
+// so a file can be made conditional by wrapping it in {{if}}; two layers may
+// then offer the same path as long as only one renders it. Two layers
+// rendering the same path is an error.
 func BuildPlanFS(tfs fs.FS, o Options) (Plan, error) {
 	o, err := Normalize(o)
 	if err != nil {
@@ -171,11 +177,6 @@ func BuildPlanFS(tfs fs.FS, o Options) (Plan, error) {
 			if !ok {
 				return fmt.Errorf("template %s: file name must end in .tmpl", p)
 			}
-			if prev, dup := seen[out]; dup {
-				return fmt.Errorf("templates %s and %s both produce %s", prev, p, out)
-			}
-			seen[out] = p
-
 			content, err := render(tfs, p, data)
 			if err != nil {
 				return err
@@ -183,6 +184,10 @@ func BuildPlanFS(tfs fs.FS, o Options) (Plan, error) {
 			if len(bytes.TrimSpace(content)) == 0 {
 				return nil
 			}
+			if prev, dup := seen[out]; dup {
+				return fmt.Errorf("templates %s and %s both produce %s", prev, p, out)
+			}
+			seen[out] = p
 			if path.Ext(out) == ".go" {
 				formatted, err := format.Source(content)
 				if err != nil {

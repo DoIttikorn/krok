@@ -1,0 +1,116 @@
+// Package mongodb is the MongoDB adapter for the items domain.
+package mongodb
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// CollectionName is exported so tests can clean up after themselves.
+const CollectionName = "items"
+
+// document is the stored shape. It stays in this package, so bson tags never
+// leak into the domain model.
+type document struct {
+	ID        string    `bson:"_id"`
+	Name      string    `bson:"name"`
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+}
+
+func fromDomain(it items.Item) document {
+	return document{ID: it.ID, Name: it.Name, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt}
+}
+
+func (d document) toDomain() items.Item {
+	return items.Item{ID: d.ID, Name: d.Name, CreatedAt: d.CreatedAt.UTC(), UpdatedAt: d.UpdatedAt.UTC()}
+}
+
+// Repository stores items in the "items" collection. IDs are the service's
+// own strings, not ObjectIDs, so the domain doesn't depend on MongoDB.
+type Repository struct {
+	coll *mongo.Collection
+}
+
+var _ items.Repository = (*Repository)(nil)
+
+// New uses the shared client's database; it doesn't connect on its own.
+func New(db *mongo.Database) *Repository {
+	return &Repository{coll: db.Collection(CollectionName)}
+}
+
+// Migrate creates the index List sorts on. It is idempotent, so every
+// replica can call it on startup.
+func (r *Repository) Migrate(ctx context.Context) error {
+	_, err := r.coll.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{ {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}},
+	})
+	return err
+}
+
+func (r *Repository) List(ctx context.Context) ([]items.Item, error) {
+	opts := options.Find().SetSort(bson.D{ {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}})
+	cur, err := r.coll.Find(ctx, bson.D{}, opts)
+	if err != nil {
+		return nil, err
+	}
+	var docs []document
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]items.Item, len(docs))
+	for i, d := range docs {
+		out[i] = d.toDomain()
+	}
+	return out, nil
+}
+
+func (r *Repository) ByID(ctx context.Context, id string) (items.Item, error) {
+	var d document
+	err := r.coll.FindOne(ctx, bson.D{ {Key: "_id", Value: id}}).Decode(&d)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return items.Item{}, fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	if err != nil {
+		return items.Item{}, err
+	}
+	return d.toDomain(), nil
+}
+
+func (r *Repository) Insert(ctx context.Context, it items.Item) error {
+	_, err := r.coll.InsertOne(ctx, fromDomain(it))
+	return err
+}
+
+func (r *Repository) Update(ctx context.Context, it items.Item) error {
+	res, err := r.coll.UpdateOne(ctx,
+		bson.D{ {Key: "_id", Value: it.ID}},
+		bson.D{ {Key: "$set", Value: bson.D{ {Key: "name", Value: it.Name}, {Key: "updated_at", Value: it.UpdatedAt}}}},
+	)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, it.ID)
+	}
+	return nil
+}
+
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	res, err := r.coll.DeleteOne(ctx, bson.D{ {Key: "_id", Value: id}})
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	return nil
+}

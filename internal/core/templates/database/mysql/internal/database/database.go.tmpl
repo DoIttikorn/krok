@@ -33,6 +33,9 @@ func New() (Service, error) {
 	cfg.Addr = net.JoinHostPort(getenv("DB_HOST", "localhost"), getenv("DB_PORT", "3306"))
 	cfg.DBName = getenv("DB_DATABASE", "{{.DBName}}")
 	cfg.ParseTime = true
+	// Report rows matched rather than rows changed, so an UPDATE that sets
+	// the same values still tells the caller the row exists.
+	cfg.ClientFoundRows = true
 
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
