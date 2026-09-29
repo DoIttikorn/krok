@@ -4,8 +4,8 @@
 
 Scaffold a ready-to-run Go API project with the framework and database you choose.
 
-> krok is at v0.x: the `core` API and the generated layout may still change
-> between minor versions. See [CHANGELOG.md](CHANGELOG.md).
+> krok is at v0.x: flags and the generated layout may still change between
+> minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 go install github.com/DoIttikorn/krok@latest
@@ -130,24 +130,28 @@ so the rest of the code just calls `os.Getenv`.
 ```
 krok/
 ├── main.go            entry point for go install
-├── core/              library: options, rules, plan, generate (standard library only)
+├── internal/core/     options, rules, plan, generate (standard library only)
 │   └── templates/     embedded project templates
 ├── internal/cli/      Cobra + Fang: flags → core.Options
 └── internal/tui/      Huh forms, Lip Gloss preview, spinner
 ```
 
-`core` never imports Charm or prints to the terminal (`TestStdlibOnly` enforces
-this), so other front ends or Go programs can use it directly:
+`internal/core` holds every choice, rule and template and never imports Charm
+or prints to the terminal (`TestStdlibOnly` enforces this). The CLI and the
+TUI only collect options and show progress:
 
 ```go
 p, err := core.BuildPlan(core.Options{Name: "my-api", Framework: "chi", Database: "postgres"})
-// inspect p.Files, then:
+// preview p.Files, then:
 err = core.Generate(ctx, p, "my-api", func(e core.Event) { /* progress */ })
 ```
 
+It lives under `internal/` because krok is a command, not a library: other
+modules can't import it, so it can change in any release.
+
 ## Templates
 
-`core/templates` has three layers, applied in order:
+`internal/core/templates` has three layers, applied in order:
 
 - `base/`: always
 - `framework/<id>/`: the chosen framework
@@ -158,25 +162,25 @@ err = core.Generate(ctx, p, "my-api", func(e core.Event) { /* progress */ })
 A template that renders to only whitespace produces no file, so wrapping a
 whole file in `{{if}}` makes it conditional (`cmd/worker/main.go.tmpl` does
 this). Templates get the options plus helpers such as `.HasDB`, `.HasWorker`,
-`.Services` and `.Has "redis"` (see `TemplateData` in `core/plan.go`).
+`.Services` and `.Has "redis"` (see `TemplateData` in `internal/core/plan.go`).
 
 Every file ends in `.tmpl` and is rendered with `text/template`. A `dot_`
 prefix becomes `.` (`dot_env.tmpl` → `.env`). Rendered `.go` files are
 gofmt'ed, and two layers producing the same path is an error. To add a
-framework or database, add it to `DefaultCatalog` in `core/catalog.go` and
+framework or database, add it to `DefaultCatalog` in `internal/core/catalog.go` and
 create its template directory. It then shows up in the flags, the prompts
 and the tests automatically. Templates can use `lower` and `join`, e.g.
 `{{lower .Name}}`. Rules between extras live in `normalizeFeatures` in
-`core/options.go`.
+`internal/core/options.go`.
 
 ## Development
 
 ```bash
-go test ./...                          # unit + golden tests (offline)
-go test ./core -update                 # rewrite golden files after changing templates
-KROK_E2E=1 go test ./core -run E2E     # generate every combination, go mod tidy, vet and test each,
-                                       # and check docker-compose.yml and deploy/k8s when
-                                       # Docker Compose and kubectl are installed
+go test ./...                                  # unit + golden tests (offline)
+go test ./internal/core -update                # rewrite golden files after changing templates
+KROK_E2E=1 go test ./internal/core -run E2E    # generate every combination: go mod tidy, vet and
+                                               # test each, and check docker-compose.yml and
+                                               # deploy/k8s when Docker Compose and kubectl exist
 ```
 
 ## License

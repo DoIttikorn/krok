@@ -18,7 +18,7 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 
-	"github.com/DoIttikorn/krok/core"
+	"github.com/DoIttikorn/krok/internal/core"
 	"github.com/DoIttikorn/krok/internal/tui"
 )
 

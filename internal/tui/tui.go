@@ -15,7 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/tree"
 
-	"github.com/DoIttikorn/krok/core"
+	"github.com/DoIttikorn/krok/internal/core"
 )
 
 // Fields selects which options Ask should prompt for. Fields already given

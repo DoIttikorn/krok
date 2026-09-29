@@ -1,8 +1,9 @@
 // Package core is the UI-independent heart of krok. It knows every choice a
 // generated project can have, the rules between them, and how to turn a set of
 // options into files on disk. It imports only the standard library and never
-// writes to the terminal, so any front end (CLI flags, Huh forms, Bubble Tea,
-// or another Go program) can drive it.
+// writes to the terminal, so any of krok's front ends (CLI flags, Huh forms, a
+// future Bubble Tea screen) can drive it. It is internal: krok is a command,
+// not a library, so this API can change in any release.
 package core
 
 // Choice is one selectable value, such as a framework or a database.

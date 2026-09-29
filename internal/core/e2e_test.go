@@ -13,7 +13,7 @@ import (
 // and the Kustomize manifests when Docker Compose and kubectl are installed. It needs network access to download
 // dependencies, so it only runs when KROK_E2E=1:
 //
-//	KROK_E2E=1 go test ./core -run E2E
+//	KROK_E2E=1 go test ./internal/core -run E2E
 func TestE2E(t *testing.T) {
 	if os.Getenv("KROK_E2E") != "1" {
 		t.Skip("set KROK_E2E=1 to generate and build every combination")
