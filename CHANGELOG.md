@@ -4,6 +4,13 @@ krok follows [Semantic Versioning](https://semver.org) for its command line:
 the flags and the layout of generated projects. Until v1.0.0, minor versions
 may change them.
 
+## Unreleased
+
+- Tests for the command line and the interactive prompts. `krok new` takes
+  its terminal, prompts and generator as injectable dependencies, and the
+  wizard is exercised end to end through Huh's accessible mode. CI runs the
+  tests with the race detector.
+
 ## v0.2.0
 
 - The `items` example is laid out as ports and adapters: the domain package

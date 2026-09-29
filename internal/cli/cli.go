@@ -24,13 +24,43 @@ import (
 
 // Execute runs the krok command line.
 func Execute(ctx context.Context) error {
+	d := deps{
+		terminal: isTerminal(),
+		prompt:   tui.Prompter{},
+		generate: core.Generate,
+	}
+	return fang.Execute(ctx, newRootCmd(d), fang.WithNotifySignal(os.Interrupt, syscall.SIGTERM))
+}
+
+// deps are what the commands need from outside the process. Tests replace
+// them to run without a terminal or network access.
+type deps struct {
+	// terminal reports whether stdin and stdout are a terminal, so
+	// questions can be asked.
+	terminal bool
+	prompt   prompter
+	// generate writes a plan; core.Generate, which also runs its steps.
+	generate func(ctx context.Context, p core.Plan, dir string, on func(core.Event)) error
+}
+
+// prompter is the interactive side of krok new; tui.Prompter implements it.
+type prompter interface {
+	Ask(ctx context.Context, o *core.Options, f tui.Fields) error
+	Confirm(ctx context.Context) (bool, error)
+	Spin(ctx context.Context, title string, action func(context.Context) error) error
+}
+
+func newRootCmd(d deps) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "krok",
 		Short: "Scaffold Go API projects",
 		Long:  "krok generates a ready-to-run Go API project with the framework and database you choose.",
+		// Errors are reported by the caller (Fang), not with a usage dump.
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
-	root.AddCommand(newCmd())
-	return fang.Execute(ctx, root, fang.WithNotifySignal(os.Interrupt, syscall.SIGTERM))
+	root.AddCommand(newCmd(d))
+	return root
 }
 
 type newFlags struct {
@@ -39,7 +69,7 @@ type newFlags struct {
 	features                            map[string]*bool // one --<id> flag per catalog feature
 }
 
-func newCmd() *cobra.Command {
+func newCmd(d deps) *cobra.Command {
 	cat := core.DefaultCatalog()
 	f := newFlags{features: map[string]*bool{}}
 	cmd := &cobra.Command{
@@ -56,7 +86,7 @@ func newCmd() *cobra.Command {
 			"  krok new my-api -f gin -d none -m github.com/you/my-api --dry-run",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runNew(cmd, args, f)
+			return runNew(cmd, args, f, d)
 		},
 	}
 
@@ -88,7 +118,7 @@ func newCmd() *cobra.Command {
 	return cmd
 }
 
-func runNew(cmd *cobra.Command, args []string, f newFlags) error {
+func runNew(cmd *cobra.Command, args []string, f newFlags, d deps) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -124,12 +154,12 @@ func runNew(cmd *cobra.Command, args []string, f newFlags) error {
 	wizard := ask.Any()
 	ask.Features = wizard && !featureFlags
 	ask.Logger = wizard && !cmd.Flags().Changed("log")
-	interactive := isTerminal()
+	interactive := d.terminal
 	if ask.Any() {
 		if !interactive {
 			return missingFlagsError(ask)
 		}
-		if err := tui.Ask(ctx, &o, ask); err != nil {
+		if err := d.prompt.Ask(ctx, &o, ask); err != nil {
 			return cancelled(out, err)
 		}
 	}
@@ -157,7 +187,7 @@ func runNew(cmd *cobra.Command, args []string, f newFlags) error {
 	}
 
 	if interactive && !f.yes {
-		ok, err := tui.Confirm(ctx)
+		ok, err := d.prompt.Confirm(ctx)
 		if err != nil {
 			return cancelled(out, err)
 		}
@@ -169,9 +199,12 @@ func runNew(cmd *cobra.Command, args []string, f newFlags) error {
 
 	var events []core.Event
 	if interactive {
-		events, err = tui.Generate(ctx, p, dir)
+		err = d.prompt.Spin(ctx, tui.GenerateTitle(p), func(ctx context.Context) error {
+			// events is only read after Spin returns, so no locking is needed.
+			return d.generate(ctx, p, dir, func(e core.Event) { events = append(events, e) })
+		})
 	} else {
-		err = core.Generate(ctx, p, dir, func(e core.Event) {
+		err = d.generate(ctx, p, dir, func(e core.Event) {
 			events = append(events, e)
 			logEvent(out, e)
 		})
