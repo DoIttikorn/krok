@@ -89,9 +89,10 @@ const tree = `my-api/
         </div>
       </div>
 
-      <div class="stage" id="stage" role="img" aria-label="Interactive 3D model of the generated project's layers. Drag to rotate.">
+      <div class="stage" id="stage" role="img" aria-label="Interactive 3D model of the generated project as a hexagonal architecture: the domain in the middle hexagon, ports on its faces, adapters around it. Drag to rotate.">
         <div class="tip" id="tip" hidden></div>
-        <p class="hint">drag to rotate · hover a layer</p>
+        <button type="button" id="labels-toggle" aria-pressed="true">names</button>
+        <p class="hint">drag to rotate · hover a piece</p>
         <noscript><p class="fallback">Enable JavaScript to see the interactive model.</p></noscript>
       </div>
     </section>
@@ -166,6 +167,13 @@ const tree = `my-api/
     }),
   );
 
+  const labelsToggle = document.getElementById("labels-toggle")!;
+  labelsToggle.addEventListener("click", () => {
+    const on = labelsToggle.getAttribute("aria-pressed") !== "true";
+    labelsToggle.setAttribute("aria-pressed", String(on));
+    stage.classList.toggle("hide-labels", !on);
+  });
+
   const copy = document.getElementById("copy")!;
   copy.addEventListener("click", async () => {
     try {
@@ -227,6 +235,14 @@ const tree = `my-api/
   .stage :global(canvas:active) { cursor: grabbing; }
   .tip { position: absolute; left: 0; top: 0; z-index: 2; pointer-events: none; font: 0.78rem var(--mono); background: #0b0f19ee; border: 1px solid var(--line); padding: 4px 8px; border-radius: 6px; white-space: nowrap; }
   .hint { position: absolute; bottom: 10px; left: 0; right: 0; text-align: center; margin: 0; font: 0.75rem var(--mono); color: var(--muted); pointer-events: none; }
+  .stage :global(.labels) { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  .stage :global(.lbl) { position: absolute; left: 0; top: 0; white-space: nowrap; font: 600 0.72rem var(--mono); color: var(--text); text-shadow: 0 0 6px #0b0f19, 0 0 2px #0b0f19; will-change: transform; }
+  .stage :global(.lbl.port) { font-weight: 500; font-size: 0.64rem; color: #f9a8d4; }
+  .stage :global(.lbl.core) { font-size: 0.8rem; letter-spacing: 0.06em; }
+  .stage.hide-labels :global(.labels) { display: none; }
+  #labels-toggle { position: absolute; top: 10px; right: 10px; z-index: 2; font: 0.72rem var(--mono); color: var(--muted); background: #0b0f19cc; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+  #labels-toggle[aria-pressed="true"] { color: var(--accent); border-color: #14524a; }
+  #labels-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .fallback, .nogl::after { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); margin: 0; }
   .nogl::after { content: "3D preview needs WebGL."; }
 

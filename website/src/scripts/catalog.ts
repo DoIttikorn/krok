@@ -10,17 +10,38 @@ export interface Extra {
   flag: string;
   label: string;
   color: number;
+  // Which port of the hexagon the adapter plugs into (see portSlots).
+  slot: number;
 }
 
+// Direction of each hexagon face, in degrees around the domain core.
+export const portSlots = {
+  http: 180,
+  repository: 0,
+  docs: 120,
+  config: 240,
+  messaging: 60,
+  jobs: 300,
+} as const;
+
+export const portLabels: Record<number, string> = {
+  180: "HTTP port · driving",
+  0: "Repository port · driven",
+  120: "Docs port · driving",
+  240: "Config port · driven",
+  60: "Cache and messaging port · driven",
+  300: "Jobs and events port · driven",
+};
+
 export const extras: Extra[] = [
-  { id: "openapi", flag: "--openapi", label: "OpenAPI (Huma)", color: 0x86efac },
-  { id: "redis", flag: "--redis", label: "Redis", color: 0xf87171 },
-  { id: "kafka", flag: "--kafka", label: "Kafka", color: 0xe2e8f0 },
-  { id: "rabbitmq", flag: "--rabbitmq", label: "RabbitMQ", color: 0xfb923c },
-  { id: "asynq", flag: "--asynq", label: "Asynq", color: 0xfacc15 },
-  { id: "river", flag: "--river", label: "River", color: 0x22d3ee },
-  { id: "watermill", flag: "--watermill", label: "Watermill", color: 0xa5b4fc },
-  { id: "keyvault", flag: "--key-vault", label: "Key Vault", color: 0x60a5fa },
+  { id: "openapi", flag: "--openapi", label: "OpenAPI (Huma)", color: 0x86efac, slot: portSlots.docs },
+  { id: "redis", flag: "--redis", label: "Redis", color: 0xf87171, slot: portSlots.messaging },
+  { id: "kafka", flag: "--kafka", label: "Kafka", color: 0xe2e8f0, slot: portSlots.messaging },
+  { id: "rabbitmq", flag: "--rabbitmq", label: "RabbitMQ", color: 0xfb923c, slot: portSlots.messaging },
+  { id: "asynq", flag: "--asynq", label: "Asynq", color: 0xfacc15, slot: portSlots.jobs },
+  { id: "river", flag: "--river", label: "River", color: 0x22d3ee, slot: portSlots.jobs },
+  { id: "watermill", flag: "--watermill", label: "Watermill", color: 0xa5b4fc, slot: portSlots.jobs },
+  { id: "keyvault", flag: "--key-vault", label: "Key Vault", color: 0x60a5fa, slot: portSlots.config },
 ];
 
 export const frameworkColor: Record<Framework, number> = {
