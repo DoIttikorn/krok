@@ -1,0 +1,24 @@
+{{if .KeyVault -}}
+# Settings come from Azure Key Vault: a secret named DB-PASSWORD becomes
+# DB_PASSWORD. Anything set here or in the real environment wins over the vault.
+AZURE_KEY_VAULT_NAME=
+{{else -}}
+PORT=8080
+{{- if .HasDB}}
+DB_HOST=localhost
+DB_PORT={{.DBPort}}
+DB_DATABASE={{.DBName}}
+DB_USERNAME=app
+DB_PASSWORD=secret
+{{- end}}
+{{- if .Has "redis"}}
+REDIS_ADDR=localhost:6379
+REDIS_PASSWORD=
+{{- end}}
+{{- if .Has "kafka"}}
+KAFKA_BROKERS=localhost:9092
+{{- end}}
+{{- if .Has "rabbitmq"}}
+RABBITMQ_URL=amqp://app:secret@localhost:5672/
+{{- end}}
+{{end -}}

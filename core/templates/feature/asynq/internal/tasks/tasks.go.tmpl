@@ -1,0 +1,65 @@
+// Package tasks defines background tasks that run with Asynq on Redis.
+package tasks
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+
+	"github.com/hibiken/asynq"
+
+	"{{.ModulePath}}/internal/redis"
+)
+
+// TypeExample is an example task type. Register new types in RunWorker.
+const TypeExample = "example:log"
+
+// ExamplePayload is the payload of a TypeExample task.
+type ExamplePayload struct {
+	Message string `json:"message"`
+}
+
+// NewExampleTask builds a task to pass to Client.Enqueue.
+func NewExampleTask(message string) (*asynq.Task, error) {
+	payload, err := json.Marshal(ExamplePayload{Message: message})
+	if err != nil {
+		return nil, err
+	}
+	return asynq.NewTask(TypeExample, payload), nil
+}
+
+// Client enqueues tasks.
+type Client = asynq.Client
+
+// NewClient returns a client that shares rdb's connection pool. Closing the
+// client leaves rdb open.
+func NewClient(rdb *redis.Client) *Client { return asynq.NewClientFromRedisClient(rdb) }
+
+// RunWorker processes tasks until ctx is done. cmd/worker calls it.
+func RunWorker(ctx context.Context) error {
+	rdb, err := redis.New()
+	if err != nil {
+		return err
+	}
+	defer rdb.Close()
+
+	srv := asynq.NewServerFromRedisClient(rdb, asynq.Config{Concurrency: 10})
+	mux := asynq.NewServeMux()
+	mux.HandleFunc(TypeExample, handleExample)
+	if err := srv.Start(mux); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	srv.Shutdown()
+	return nil
+}
+
+func handleExample(ctx context.Context, t *asynq.Task) error {
+	var p ExamplePayload
+	if err := json.Unmarshal(t.Payload(), &p); err != nil {
+		return fmt.Errorf("decode %s payload: %w", t.Type(), err)
+	}
+	log.Printf("asynq: %s: %s", t.Type(), p.Message)
+	return nil
+}

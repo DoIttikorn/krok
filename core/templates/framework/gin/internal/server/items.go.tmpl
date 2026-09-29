@@ -1,0 +1,74 @@
+{{- if not (.Has "openapi") -}}
+package server
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+func (s *Server) itemRoutes(g *gin.RouterGroup) {
+	g.GET("", s.listItems)
+	g.POST("", s.createItem)
+	g.GET("/:id", s.getItem)
+	g.PUT("/:id", s.updateItem)
+	g.DELETE("/:id", s.deleteItem)
+}
+
+func (s *Server) listItems(c *gin.Context) {
+	list, err := s.items.List(c.Request.Context())
+	if err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	c.JSON(http.StatusOK, itemList{Items: list})
+}
+
+func (s *Server) createItem(c *gin.Context) {
+	var in items.Input
+	if err := decodeJSON(c.Request, &in); err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	it, err := s.items.Create(c.Request.Context(), in)
+	if err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	c.Header("Location", "/api/v1/items/"+it.ID)
+	c.JSON(http.StatusCreated, it)
+}
+
+func (s *Server) getItem(c *gin.Context) {
+	it, err := s.items.Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	c.JSON(http.StatusOK, it)
+}
+
+func (s *Server) updateItem(c *gin.Context) {
+	var in items.Input
+	if err := decodeJSON(c.Request, &in); err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	it, err := s.items.Update(c.Request.Context(), c.Param("id"), in)
+	if err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	c.JSON(http.StatusOK, it)
+}
+
+func (s *Server) deleteItem(c *gin.Context) {
+	if err := s.items.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		writeProblem(c.Writer, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+{{- end}}

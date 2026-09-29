@@ -1,0 +1,34 @@
+// Package redis connects to Redis with go-redis.
+package redis
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+
+	goredis "github.com/redis/go-redis/v9"
+)
+
+// Client is the go-redis client, so callers don't need to import go-redis.
+type Client = goredis.Client
+
+// New creates a client from REDIS_ADDR, REDIS_PASSWORD and REDIS_DB. It
+// connects lazily, on the first command.
+func New() (*Client, error) {
+	db, err := strconv.Atoi(getenv("REDIS_DB", "0"))
+	if err != nil {
+		return nil, fmt.Errorf("REDIS_DB: %w", err)
+	}
+	return goredis.NewClient(&goredis.Options{
+		Addr:     getenv("REDIS_ADDR", "localhost:6379"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       db,
+	}), nil
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

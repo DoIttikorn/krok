@@ -1,0 +1,214 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"sync/atomic"
+	"time"
+
+	"{{.ModulePath}}/internal/items"
+{{- if .HasDB}}
+
+	"{{.ModulePath}}/internal/database"
+{{- end}}
+{{- if .Has "watermill"}}
+	"{{.ModulePath}}/internal/events"
+{{- end}}
+{{- if .Has "river"}}
+	"{{.ModulePath}}/internal/jobs"
+{{- end}}
+{{- if .Has "kafka"}}
+	"{{.ModulePath}}/internal/kafka"
+{{- end}}
+{{- if .Has "rabbitmq"}}
+	"{{.ModulePath}}/internal/rabbitmq"
+{{- end}}
+{{- if .Has "redis"}}
+	"{{.ModulePath}}/internal/redis"
+{{- end}}
+{{- if .Has "asynq"}}
+	"{{.ModulePath}}/internal/tasks"
+{{- end}}
+)
+
+// Server is the HTTP server and the dependencies its handlers need.
+type Server struct {
+	srv           *http.Server
+	draining      atomic.Bool   // set by Shutdown; fails /readyz
+	shutdownDelay time.Duration // SHUTDOWN_DELAY, see Shutdown
+	closers       []func() error
+
+	// checks are run by /readyz and /health, keyed by the name shown in the
+	// response.
+	checks map[string]func(context.Context) error
+	items  items.Store
+{{- if .HasDB}}
+	db     database.Service
+{{- end}}
+{{- if .Has "redis"}}
+	redis  *redis.Client
+{{- end}}
+{{- if .Has "kafka"}}
+	kafka  *kafka.Client
+{{- end}}
+{{- if .Has "rabbitmq"}}
+	rabbitmq *rabbitmq.Client
+{{- end}}
+{{- if .Has "asynq"}}
+	tasks  *tasks.Client // enqueue Asynq tasks
+{{- end}}
+{{- if .Has "river"}}
+	jobs   *jobs.Client // insert River jobs
+{{- end}}
+{{- if .Has "watermill"}}
+	events events.Publisher // publish Watermill messages
+{{- end}}
+}
+
+// New connects the dependencies and builds the HTTP server. Call Close when
+// done to release them.
+func New(ctx context.Context) (*Server, error) {
+	delay, err := time.ParseDuration(getenv("SHUTDOWN_DELAY", "0s"))
+	if err != nil {
+		return nil, fmt.Errorf("SHUTDOWN_DELAY: %w", err)
+	}
+	s := &Server{
+		shutdownDelay: delay,
+		checks:        map[string]func(context.Context) error{},
+		// In memory, so every replica has its own items. Swap in a
+		// database-backed items.Store before running more than one replica.
+		items: items.NewMemoryStore(),
+	}
+{{- if .HasDeps}}
+	fail := func(what string, err error) (*Server, error) {
+		s.Close()
+		return nil, fmt.Errorf("%s: %w", what, err)
+	}
+{{- end}}
+{{- if .HasDB}}
+
+	db, err := database.New()
+	if err != nil {
+		return fail("connect database", err)
+	}
+	s.db = db
+	s.checks["database"] = db.Check
+	s.closers = append(s.closers, db.Close)
+{{- end}}
+{{- if .Has "redis"}}
+
+	rdb, err := redis.New()
+	if err != nil {
+		return fail("connect redis", err)
+	}
+	s.redis = rdb
+	s.checks["redis"] = func(ctx context.Context) error { return rdb.Ping(ctx).Err() }
+	s.closers = append(s.closers, rdb.Close)
+{{- end}}
+{{- if .Has "kafka"}}
+
+	kc, err := kafka.New()
+	if err != nil {
+		return fail("connect kafka", err)
+	}
+	s.kafka = kc
+	s.checks["kafka"] = kc.Check
+	s.closers = append(s.closers, kc.Close)
+{{- end}}
+{{- if .Has "rabbitmq"}}
+
+	mq, err := rabbitmq.New()
+	if err != nil {
+		return fail("connect rabbitmq", err)
+	}
+	s.rabbitmq = mq
+	s.checks["rabbitmq"] = mq.Check
+	s.closers = append(s.closers, mq.Close)
+{{- end}}
+{{- if .Has "asynq"}}
+
+	s.tasks = tasks.NewClient(rdb)
+	s.closers = append(s.closers, s.tasks.Close)
+{{- end}}
+{{- if .Has "river"}}
+
+	jc, err := jobs.New(ctx)
+	if err != nil {
+		return fail("start river client", err)
+	}
+	s.jobs = jc
+	s.closers = append(s.closers, jc.Close)
+{{- end}}
+{{- if .Has "watermill"}}
+
+	pub, err := events.NewPublisher()
+	if err != nil {
+		return fail("create watermill publisher", err)
+	}
+	s.events = pub
+	s.closers = append(s.closers, pub.Close)
+{{- end}}
+
+	s.srv = &http.Server{
+		Addr:              ":" + getenv("PORT", "8080"),
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       time.Minute,
+	}
+	return s, nil
+}
+
+// Handler serves the probes and the API. The probes are mounted outside the
+// framework router so they stay cheap and don't fill the request log.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", s.livez)
+	mux.HandleFunc("GET /readyz", s.readyz)
+	mux.HandleFunc("GET /health", s.healthz)
+	mux.Handle("/", s.RegisterRoutes())
+	return mux
+}
+
+// Addr is the address the server listens on, e.g. ":8080".
+func (s *Server) Addr() string { return s.srv.Addr }
+
+// ListenAndServe serves until Shutdown; it then returns http.ErrServerClosed.
+func (s *Server) ListenAndServe() error { return s.srv.ListenAndServe() }
+
+// Shutdown stops the server without dropping requests during a Kubernetes
+// rolling update. It first fails /readyz so the pod is taken out of the
+// Service, waits SHUTDOWN_DELAY for ingress-nginx to stop sending new
+// requests, then stops listening and waits for in-flight requests to finish.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.draining.Store(true)
+	if s.shutdownDelay > 0 {
+		log.Printf("draining for %s", s.shutdownDelay)
+		select {
+		case <-time.After(s.shutdownDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.srv.Shutdown(ctx)
+}
+
+// Close releases the dependencies in reverse order of creation.
+func (s *Server) Close() {
+	for i := len(s.closers) - 1; i >= 0; i-- {
+		if err := s.closers[i](); err != nil {
+			log.Printf("close: %v", err)
+		}
+	}
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

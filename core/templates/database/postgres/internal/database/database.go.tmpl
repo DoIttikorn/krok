@@ -1,0 +1,63 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"net"
+	"net/url"
+	"os"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+// Service is the database dependency the server uses.
+type Service interface {
+	// Check pings the database; the server's /health uses it.
+	Check(ctx context.Context) error
+	// SQL returns the underlying connection pool for queries.
+	SQL() *sql.DB
+	Close() error
+}
+
+type service struct {
+	db *sql.DB
+}
+
+// New opens a PostgreSQL connection pool configured from environment
+// variables. It does not wait for the database to be reachable.
+func New() (Service, error) {
+	db, err := sql.Open("pgx", DSN())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	return &service{db: db}, nil
+}
+
+func (s *service) Check(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+// DSN returns the PostgreSQL connection URL built from the DB_* settings.
+func DSN() string {
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(getenv("DB_USERNAME", "app"), getenv("DB_PASSWORD", "secret")),
+		Host:     net.JoinHostPort(getenv("DB_HOST", "localhost"), getenv("DB_PORT", "5432")),
+		Path:     getenv("DB_DATABASE", "{{.DBName}}"),
+		RawQuery: "sslmode=" + getenv("DB_SSLMODE", "disable"),
+	}
+	return u.String()
+}
+
+func (s *service) SQL() *sql.DB { return s.db }
+
+func (s *service) Close() error { return s.db.Close() }
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

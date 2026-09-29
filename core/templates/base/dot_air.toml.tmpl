@@ -1,0 +1,18 @@
+# Live reload for development: run "make watch".
+# Reference: https://github.com/air-verse/air/blob/master/air_example.toml
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/main ./cmd/api"
+  entrypoint = ["./tmp/main"]
+  include_ext = ["go"]
+  exclude_dir = ["bin", "tmp", "vendor", "deploy"]
+  exclude_regex = ["_test\\.go"]
+  delay = 500 # ms
+  stop_on_error = true
+  send_interrupt = true
+  kill_delay = "5s"
+
+[misc]
+  clean_on_exit = true

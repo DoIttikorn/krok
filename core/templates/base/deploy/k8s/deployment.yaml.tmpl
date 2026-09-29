@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.K8sName}}
+  labels:
+    app.kubernetes.io/name: {{.K8sName}}
+    app.kubernetes.io/component: api
+spec:
+  # No replicas field: the HorizontalPodAutoscaler owns it (minimum 2).
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # keep full capacity during a rollout
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{.K8sName}}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{.K8sName}}
+        app.kubernetes.io/component: api
+{{- if .KeyVault}}
+        azure.workload.identity/use: "true"
+{{- end}}
+    spec:
+{{- if .KeyVault}}
+      serviceAccountName: {{.K8sName}}
+{{- end}}
+      terminationGracePeriodSeconds: 30
+      # Spread replicas across nodes and zones so one failure can't take
+      # them all down.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{.K8sName}}
+              app.kubernetes.io/component: api
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{.K8sName}}
+              app.kubernetes.io/component: api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # the distroless "nonroot" user
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{lower .Name}}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            # On SIGTERM, fail /readyz and wait this long before closing the
+            # listener, so ingress-nginx stops sending requests first.
+            - name: SHUTDOWN_DELAY
+              value: 5s
+{{- if .KeyVault}}
+            - name: AZURE_KEY_VAULT_NAME
+              value: your-key-vault # TODO
+{{- end}}
+          # Settings from a Secret, if present:
+          #   kubectl create secret generic {{.K8sName}}-env --from-env-file=.env
+          envFrom:
+            - secretRef:
+                name: {{.K8sName}}-env
+                optional: true
+          # Gives a slow start up to 60s before liveness checks begin.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          # Restarts the container only if the process stops answering.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # Takes the pod out of the Service while a dependency is down or
+          # while it shuts down.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

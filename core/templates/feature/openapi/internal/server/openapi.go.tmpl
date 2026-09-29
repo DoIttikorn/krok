@@ -1,0 +1,122 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+
+	"github.com/danielgtaylor/huma/v2"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// apiConfig describes the API. Huma serves the OpenAPI 3.1 spec at
+// /openapi.json (and .yaml) and interactive docs at /docs.
+func apiConfig() huma.Config {
+	c := huma.DefaultConfig("{{.Name}}", "1.0.0")
+	c.DocsRenderer = huma.DocsRendererScalar
+	return c
+}
+
+// Request and response shapes. Huma validates requests against them and
+// documents them in the spec; Body is the JSON body, other fields map to
+// path parameters and headers through their tags.
+type (
+	itemIDInput struct {
+		ID string `path:"id" doc:"Item ID"`
+	}
+	createItemInput struct {
+		Body items.Input
+	}
+	updateItemInput struct {
+		ID   string `path:"id" doc:"Item ID"`
+		Body items.Input
+	}
+	itemOutput struct {
+		Body items.Item
+	}
+	createdItemOutput struct {
+		Location string `header:"Location" doc:"URL of the new item"`
+		Body     items.Item
+	}
+	itemListOutput struct {
+		Body struct {
+			Items []items.Item `json:"items"`
+		}
+	}
+)
+
+// registerItems adds the /api/v1/items operations to api.
+func (s *Server) registerItems(api huma.API) {
+	tags := []string{"Items"}
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-items", Method: http.MethodGet, Path: "/api/v1/items",
+		Summary: "List items", Tags: tags,
+	}, func(ctx context.Context, _ *struct{}) (*itemListOutput, error) {
+		list, err := s.items.List(ctx)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		out := &itemListOutput{}
+		out.Body.Items = list
+		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "create-item", Method: http.MethodPost, Path: "/api/v1/items",
+		Summary: "Create an item", Tags: tags, DefaultStatus: http.StatusCreated,
+	}, func(ctx context.Context, in *createItemInput) (*createdItemOutput, error) {
+		it, err := s.items.Create(ctx, in.Body)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		return &createdItemOutput{Location: "/api/v1/items/" + it.ID, Body: it}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-item", Method: http.MethodGet, Path: "/api/v1/items/{id}",
+		Summary: "Get an item", Tags: tags,
+	}, func(ctx context.Context, in *itemIDInput) (*itemOutput, error) {
+		it, err := s.items.Get(ctx, in.ID)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		return &itemOutput{Body: it}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "update-item", Method: http.MethodPut, Path: "/api/v1/items/{id}",
+		Summary: "Replace an item", Tags: tags,
+	}, func(ctx context.Context, in *updateItemInput) (*itemOutput, error) {
+		it, err := s.items.Update(ctx, in.ID, in.Body)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		return &itemOutput{Body: it}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "delete-item", Method: http.MethodDelete, Path: "/api/v1/items/{id}",
+		Summary: "Delete an item", Tags: tags, DefaultStatus: http.StatusNoContent,
+	}, func(ctx context.Context, in *itemIDInput) (*struct{}, error) {
+		if err := s.items.Delete(ctx, in.ID); err != nil {
+			return nil, apiError(err)
+		}
+		return nil, nil
+	})
+}
+
+// apiError maps domain errors to RFC 9457 problem responses. Unexpected
+// errors are logged and their details are not sent to the client.
+func apiError(err error) error {
+	switch {
+	case errors.Is(err, items.ErrNotFound):
+		return huma.Error404NotFound(err.Error())
+	case errors.Is(err, items.ErrInvalid):
+		return huma.Error422UnprocessableEntity(err.Error())
+	}
+	log.Printf("internal error: %v", err)
+	return huma.Error500InternalServerError("")
+}

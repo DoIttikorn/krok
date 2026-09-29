@@ -1,0 +1,31 @@
+package server
+
+import (
+	"net/http"
+
+{{- if .Has "openapi"}}
+	"github.com/danielgtaylor/huma/v2/adapters/humaecho"
+{{- end}}
+	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
+)
+
+// RegisterRoutes returns the router with every API route mounted. The
+// probes (/livez, /readyz, /health) are served by Handler.
+func (s *Server) RegisterRoutes() http.Handler {
+	e := echo.New()
+	e.Use(middleware.RequestLogger(), middleware.Recover())
+
+	e.GET("/", s.helloHandler)
+{{- if .Has "openapi"}}
+	s.registerItems(humaecho.New(e, apiConfig()))
+{{- else}}
+	s.itemRoutes(e.Group("/api/v1/items"))
+{{- end}}
+
+	return e
+}
+
+func (s *Server) helloHandler(c *echo.Context) error {
+	return c.JSON(http.StatusOK, map[string]string{"message": "Hello World"})
+}

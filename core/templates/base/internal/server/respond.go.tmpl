@@ -1,0 +1,69 @@
+{{- if not (.Has "openapi") -}}
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// errBadRequest marks errors caused by a malformed request.
+var errBadRequest = errors.New("bad request")
+
+// maxBodyBytes limits the request bodies decodeJSON reads.
+const maxBodyBytes = 1 << 20
+
+// decodeJSON reads a JSON request body into v and rejects unknown fields.
+func decodeJSON(r *http.Request, v any) error {
+	dec := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("%w: invalid JSON body: %v", errBadRequest, err)
+	}
+	return nil
+}
+
+// itemList is the response body of GET /api/v1/items. An object rather than
+// a bare array leaves room for pagination fields later.
+type itemList struct {
+	Items []items.Item `json:"items"`
+}
+
+// problem is an RFC 9457 error response body.
+type problem struct {
+	Title  string `json:"title"`
+	Status int    `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// writeProblem answers with the problem that matches err. Unexpected errors
+// are logged and their details are not sent to the client.
+func writeProblem(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, errBadRequest):
+		status = http.StatusBadRequest
+	case errors.Is(err, items.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, items.ErrInvalid):
+		status = http.StatusUnprocessableEntity
+	}
+	p := problem{Title: http.StatusText(status), Status: status}
+	if status == http.StatusInternalServerError {
+		log.Printf("internal error: %v", err)
+	} else {
+		p.Detail = err.Error()
+	}
+
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(p); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}
+{{- end}}

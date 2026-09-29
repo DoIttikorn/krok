@@ -1,0 +1,15 @@
+{{- if .HasWorker -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{.K8sName}}-worker
+  labels:
+    app.kubernetes.io/name: {{.K8sName}}
+    app.kubernetes.io/component: worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{.K8sName}}
+      app.kubernetes.io/component: worker
+{{- end}}

@@ -1,0 +1,131 @@
+// Package items is an example REST resource: the model, the Store interface
+// the handlers depend on, and an in-memory Store. Replace MemoryStore with a
+// database-backed Store; the handlers don't change.
+package items
+
+import (
+	"cmp"
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	// ErrNotFound is returned when no item has the requested ID.
+	ErrNotFound = errors.New("item not found")
+	// ErrInvalid wraps validation errors in the input.
+	ErrInvalid = errors.New("invalid item")
+)
+
+// Item is the resource returned by the API.
+type Item struct {
+	ID        string    `json:"id"{{if .Has "openapi"}} doc:"Unique identifier"{{end}}`
+	Name      string    `json:"name"{{if .Has "openapi"}} doc:"Display name"{{end}}`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Input is the request body to create or replace an item.
+type Input struct {
+	Name string `json:"name"{{if .Has "openapi"}} minLength:"1" maxLength:"200" doc:"Display name"{{end}}`
+}
+
+// Validate reports whether in can be stored.
+func (in Input) Validate() error {
+	name := strings.TrimSpace(in.Name)
+	switch {
+	case name == "":
+		return fmt.Errorf("%w: name is required", ErrInvalid)
+	case len(name) > 200:
+		return fmt.Errorf("%w: name must be at most 200 characters", ErrInvalid)
+	}
+	return nil
+}
+
+// Store persists items.
+type Store interface {
+	List(ctx context.Context) ([]Item, error)
+	Get(ctx context.Context, id string) (Item, error)
+	Create(ctx context.Context, in Input) (Item, error)
+	Update(ctx context.Context, id string, in Input) (Item, error)
+	Delete(ctx context.Context, id string) error
+}
+
+// MemoryStore keeps items in memory. Each replica has its own copy and
+// everything is lost on restart, so it is only for trying the API out.
+type MemoryStore struct {
+	mu    sync.RWMutex
+	items map[string]Item
+}
+
+func NewMemoryStore() *MemoryStore {
+	return &MemoryStore{items: map[string]Item{}}
+}
+
+// List returns every item, oldest first.
+func (s *MemoryStore) List(ctx context.Context) ([]Item, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Item, 0, len(s.items))
+	for _, it := range s.items {
+		out = append(out, it)
+	}
+	slices.SortFunc(out, func(a, b Item) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), strings.Compare(a.ID, b.ID))
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) Get(ctx context.Context, id string) (Item, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	it, ok := s.items[id]
+	if !ok {
+		return Item{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	return it, nil
+}
+
+func (s *MemoryStore) Create(ctx context.Context, in Input) (Item, error) {
+	if err := in.Validate(); err != nil {
+		return Item{}, err
+	}
+	now := time.Now().UTC()
+	it := Item{ID: rand.Text(), Name: strings.TrimSpace(in.Name), CreatedAt: now, UpdatedAt: now}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items[it.ID] = it
+	return it, nil
+}
+
+func (s *MemoryStore) Update(ctx context.Context, id string, in Input) (Item, error) {
+	if err := in.Validate(); err != nil {
+		return Item{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[id]
+	if !ok {
+		return Item{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	it.Name = strings.TrimSpace(in.Name)
+	it.UpdatedAt = time.Now().UTC()
+	s.items[id] = it
+	return it, nil
+}
+
+func (s *MemoryStore) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.items[id]; !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	delete(s.items, id)
+	return nil
+}

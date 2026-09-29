@@ -1,0 +1,63 @@
+package database
+
+import (
+	"context"
+	"net"
+	"net/url"
+	"os"
+	"time"
+
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+)
+
+// Service is the database dependency the server uses.
+type Service interface {
+	// Check pings the database; the server's /health uses it.
+	Check(ctx context.Context) error
+	// Database returns the application database handle.
+	Database() *mongo.Database
+	Close() error
+}
+
+type service struct {
+	client *mongo.Client
+	db     *mongo.Database
+}
+
+// New creates a MongoDB client configured from environment variables. It
+// does not wait for the database to be reachable.
+func New() (Service, error) {
+	uri := url.URL{
+		Scheme:   "mongodb",
+		User:     url.UserPassword(getenv("DB_USERNAME", "app"), getenv("DB_PASSWORD", "secret")),
+		Host:     net.JoinHostPort(getenv("DB_HOST", "localhost"), getenv("DB_PORT", "27017")),
+		Path:     "/",
+		RawQuery: "authSource=admin",
+	}
+	client, err := mongo.Connect(options.Client().ApplyURI(uri.String()))
+	if err != nil {
+		return nil, err
+	}
+	return &service{
+		client: client,
+		db:     client.Database(getenv("DB_DATABASE", "{{.DBName}}")),
+	}, nil
+}
+
+func (s *service) Check(ctx context.Context) error { return s.client.Ping(ctx, nil) }
+
+func (s *service) Database() *mongo.Database { return s.db }
+
+func (s *service) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.client.Disconnect(ctx)
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

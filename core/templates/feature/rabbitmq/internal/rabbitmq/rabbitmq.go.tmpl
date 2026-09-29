@@ -1,0 +1,121 @@
+// Package rabbitmq publishes and consumes RabbitMQ messages with amqp091-go.
+package rabbitmq
+
+import (
+	"context"
+	"errors"
+	"log"
+	"os"
+	"sync"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
+
+// URL returns RABBITMQ_URL, e.g. amqp://user:pass@host:5672/.
+func URL() string { return getenv("RABBITMQ_URL", "amqp://app:secret@localhost:5672/") }
+
+// Queue is the example queue: RABBITMQ_QUEUE, default "events".
+func Queue() string { return getenv("RABBITMQ_QUEUE", "events") }
+
+// Client publishes messages over one connection and channel.
+type Client struct {
+	conn *amqp.Connection
+	mu   sync.Mutex // amqp channels are not safe for concurrent use
+	ch   *amqp.Channel
+}
+
+// New connects to RabbitMQ. Unlike the other clients it dials right away,
+// so the app fails fast if RabbitMQ is unreachable. It does not reconnect;
+// if the connection drops, /health reports it and your orchestrator should
+// restart the pod.
+func New() (*Client, error) {
+	conn, err := amqp.Dial(URL())
+	if err != nil {
+		return nil, err
+	}
+	ch, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return &Client{conn: conn, ch: ch}, nil
+}
+
+// Publish sends a persistent message to queue, declaring it as durable first.
+func (c *Client) Publish(ctx context.Context, queue string, body []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
+		return err
+	}
+	return c.ch.PublishWithContext(ctx, "", queue, false, false, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		Body:         body,
+	})
+}
+
+// Check reports whether the connection is still open; /health uses it.
+func (c *Client) Check(context.Context) error {
+	if c.conn.IsClosed() {
+		return errors.New("connection closed")
+	}
+	return nil
+}
+
+func (c *Client) Close() error { return c.conn.Close() }
+
+// RunWorker consumes Queue() and logs each message until ctx is done. Replace
+// handleMessage with your own logic. cmd/worker calls it.
+func RunWorker(ctx context.Context) error {
+	conn, err := amqp.Dial(URL())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	ch, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	if _, err := ch.QueueDeclare(Queue(), true, false, false, false, nil); err != nil {
+		return err
+	}
+	if err := ch.Qos(10, 0, false); err != nil {
+		return err
+	}
+	deliveries, err := ch.Consume(Queue(), "", false, false, false, false, nil)
+	if err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case d, ok := <-deliveries:
+			if !ok {
+				return errors.New("rabbitmq: delivery channel closed")
+			}
+			if err := handleMessage(ctx, d); err != nil {
+				log.Printf("rabbitmq: handle message: %v", err)
+				// Not requeued, to avoid redelivering a failing message
+				// forever. Configure a dead-letter exchange to keep it.
+				_ = d.Nack(false, false)
+				continue
+			}
+			_ = d.Ack(false)
+		}
+	}
+}
+
+func handleMessage(ctx context.Context, d amqp.Delivery) error {
+	log.Printf("rabbitmq: %s", d.Body)
+	return nil
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

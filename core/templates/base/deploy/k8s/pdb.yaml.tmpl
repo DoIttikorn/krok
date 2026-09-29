@@ -1,0 +1,14 @@
+# Node drains and cluster upgrades evict at most one API pod at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{.K8sName}}
+  labels:
+    app.kubernetes.io/name: {{.K8sName}}
+    app.kubernetes.io/component: api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{.K8sName}}
+      app.kubernetes.io/component: api

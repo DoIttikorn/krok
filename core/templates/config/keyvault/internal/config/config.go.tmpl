@@ -1,0 +1,103 @@
+// Package config loads settings into the process environment before the
+// rest of the app reads them with os.Getenv.
+package config
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+	"github.com/joho/godotenv"
+)
+
+// Load copies every enabled secret from the Azure Key Vault named by
+// AZURE_KEY_VAULT_NAME into the environment. A secret named DB-PASSWORD
+// becomes DB_PASSWORD. Variables already set, in the real environment or in
+// an optional .env file, take precedence over the vault so you can override
+// a single value locally.
+//
+// Authentication uses DefaultAzureCredential: "az login" on a developer
+// machine, managed identity or workload identity in Azure. The identity needs
+// the "Key Vault Secrets User" role on the vault.
+func Load(ctx context.Context) error {
+	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	name := os.Getenv("AZURE_KEY_VAULT_NAME")
+	if name == "" {
+		return errors.New("AZURE_KEY_VAULT_NAME is not set")
+	}
+
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return fmt.Errorf("azure credential: %w", err)
+	}
+	client, err := azsecrets.NewClient(VaultURL(name), cred, nil)
+	if err != nil {
+		return fmt.Errorf("key vault client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	pager := client.NewListSecretPropertiesPager(nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list secrets in %s: %w", name, err)
+		}
+		for _, p := range page.Value {
+			if skip(p) {
+				continue
+			}
+			key := EnvKey(p.ID.Name())
+			if _, set := os.LookupEnv(key); set {
+				continue
+			}
+			resp, err := client.GetSecret(ctx, p.ID.Name(), "", nil)
+			if err != nil {
+				return fmt.Errorf("get secret %s: %w", p.ID.Name(), err)
+			}
+			if resp.Value == nil {
+				continue
+			}
+			if err := os.Setenv(key, *resp.Value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// skip reports whether a secret should not be loaded: disabled secrets and
+// the ones Key Vault manages to back certificates.
+func skip(p *azsecrets.SecretProperties) bool {
+	if p.ID == nil {
+		return true
+	}
+	if p.Managed != nil && *p.Managed {
+		return true
+	}
+	return p.Attributes != nil && p.Attributes.Enabled != nil && !*p.Attributes.Enabled
+}
+
+// VaultURL turns a vault name into its URL. A full URL is returned as is,
+// for sovereign clouds such as https://my-vault.vault.azure.cn/.
+func VaultURL(name string) string {
+	if strings.Contains(name, "://") {
+		return name
+	}
+	return "https://" + name + ".vault.azure.net/"
+}
+
+// EnvKey maps a Key Vault secret name to an environment variable name.
+// Secret names allow only letters, digits and dashes.
+func EnvKey(secret string) string {
+	return strings.ToUpper(strings.ReplaceAll(secret, "-", "_"))
+}

@@ -1,0 +1,38 @@
+package config
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func TestEnvKey(t *testing.T) {
+	tests := map[string]string{
+		"DB-PASSWORD": "DB_PASSWORD",
+		"db-host":     "DB_HOST",
+		"PORT":        "PORT",
+	}
+	for in, want := range tests {
+		if got := EnvKey(in); got != want {
+			t.Errorf("EnvKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestVaultURL(t *testing.T) {
+	if got, want := VaultURL("my-vault"), "https://my-vault.vault.azure.net/"; got != want {
+		t.Errorf("VaultURL(name) = %q, want %q", got, want)
+	}
+	url := "https://my-vault.vault.azure.cn/"
+	if got := VaultURL(url); got != url {
+		t.Errorf("VaultURL(url) = %q, want %q", got, url)
+	}
+}
+
+func TestLoadRequiresVaultName(t *testing.T) {
+	t.Setenv("AZURE_KEY_VAULT_NAME", "")
+	err := Load(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "AZURE_KEY_VAULT_NAME") {
+		t.Fatalf("err = %v, want AZURE_KEY_VAULT_NAME is not set", err)
+	}
+}

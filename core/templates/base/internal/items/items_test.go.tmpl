@@ -1,0 +1,55 @@
+package items
+
+import (
+	"context"
+	"errors"
+	"testing"
+)
+
+func TestMemoryStore(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+
+	created, err := s.Create(ctx, Input{Name: "  first  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.Name != "first" {
+		t.Fatalf("Create = %+v, want an ID and a trimmed name", created)
+	}
+
+	updated, err := s.Update(ctx, created.ID, Input{Name: "renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "renamed" || !updated.CreatedAt.Equal(created.CreatedAt) {
+		t.Errorf("Update = %+v, want new name and unchanged CreatedAt", updated)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List = %v, %v; want one item", list, err)
+	}
+
+	if err := s.Delete(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get after Delete: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryStoreErrors(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+
+	if _, err := s.Create(ctx, Input{Name: "   "}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("Create blank name: err = %v, want ErrInvalid", err)
+	}
+	if _, err := s.Update(ctx, "missing", Input{Name: "x"}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Update missing: err = %v, want ErrNotFound", err)
+	}
+	if err := s.Delete(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete missing: err = %v, want ErrNotFound", err)
+	}
+}

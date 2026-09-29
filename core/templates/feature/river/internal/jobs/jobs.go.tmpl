@@ -1,0 +1,129 @@
+// Package jobs runs background jobs with River, stored in PostgreSQL.
+package jobs
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivermigrate"
+
+	"{{.ModulePath}}/internal/database"
+)
+
+// ExampleArgs is an example job. Each job type is an args struct with a
+// Kind and a worker registered in RunWorker.
+type ExampleArgs struct {
+	Message string `json:"message"`
+}
+
+func (ExampleArgs) Kind() string { return "example" }
+
+// ExampleWorker works ExampleArgs jobs.
+type ExampleWorker struct {
+	river.WorkerDefaults[ExampleArgs]
+}
+
+func (w *ExampleWorker) Work(ctx context.Context, job *river.Job[ExampleArgs]) error {
+	log.Printf("river: job %d: %s", job.ID, job.Args.Message)
+	return nil
+}
+
+// Client inserts jobs, e.g. c.Insert(ctx, jobs.ExampleArgs{Message: "hi"}, nil).
+// It does not work them; cmd/worker does.
+type Client struct {
+	*river.Client[pgx.Tx]
+	pool *pgxpool.Pool
+}
+
+// New connects to PostgreSQL with the DB_* settings, applies River's
+// migrations and returns an insert-only client.
+func New(ctx context.Context) (*Client, error) {
+	pool, err := connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return &Client{Client: rc, pool: pool}, nil
+}
+
+func (c *Client) Close() error {
+	c.pool.Close()
+	return nil
+}
+
+// RunWorker works jobs until ctx is done. cmd/worker calls it.
+func RunWorker(ctx context.Context) error {
+	pool, err := connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &ExampleWorker{})
+	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		Queues:  map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 10}},
+		Workers: workers,
+	})
+	if err != nil {
+		return err
+	}
+	if err := rc.Start(ctx); err != nil {
+		return err
+	}
+	<-ctx.Done()
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return rc.Stop(stopCtx)
+}
+
+func connect(ctx context.Context) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, database.DSN())
+	if err != nil {
+		return nil, err
+	}
+	if err := migrate(ctx, pool); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return pool, nil
+}
+
+// migrate applies River's migrations. The API and the worker both call it on
+// startup, so it holds a session-level advisory lock on one connection while
+// River migrates on others: River runs each migration in its own transaction
+// because some of them can't share one.
+func migrate(ctx context.Context, pool *pgxpool.Pool) error {
+	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
+	if err != nil {
+		return err
+	}
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock(hashtext('river_migrate'))"); err != nil {
+		conn.Release()
+		return err
+	}
+	defer func() {
+		if _, err := conn.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext('river_migrate'))"); err != nil {
+			// Closing the session releases the lock.
+			conn.Conn().Close(context.Background()) //nolint:errcheck
+		}
+		conn.Release()
+	}()
+
+	_, err = migrator.Migrate(ctx, rivermigrate.DirectionUp, nil)
+	return err
+}

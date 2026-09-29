@@ -1,0 +1,60 @@
+.PHONY: run watch build test tidy clean docker-build up down logs k8s k8s-apply{{if .HasWorker}} run-worker{{end}}{{if .Services}} deps-up{{end}}
+
+IMAGE := {{lower .Name}}
+
+## Development
+
+run:
+	go run ./cmd/api
+{{- if .HasWorker}}
+
+run-worker:
+	go run ./cmd/worker
+{{- end}}
+
+# Live reload with air; uses an installed air or falls back to go run.
+watch:
+	@if command -v air > /dev/null 2>&1; then air; else go run github.com/air-verse/air@latest; fi
+
+# Builds every command in cmd/ into bin/.
+build:
+	go build -o bin/ ./cmd/...
+
+test:
+	go test ./...
+
+tidy:
+	go mod tidy
+
+clean:
+	rm -rf bin tmp
+
+## Docker
+
+docker-build:
+	docker build -t $(IMAGE) .
+
+up:
+	docker compose up --build -d
+
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f
+
+## Kubernetes
+
+# Print the manifests Kustomize renders from deploy/k8s.
+k8s:
+	kubectl kustomize deploy/k8s
+
+k8s-apply:
+	kubectl apply -k deploy/k8s
+{{- if .Services}}
+
+# Start only the services the app needs ({{join .Services ", "}}), for
+# "make run" or "make watch" on the host.
+deps-up:
+	docker compose up -d --wait {{join .Services " "}}
+{{- end}}

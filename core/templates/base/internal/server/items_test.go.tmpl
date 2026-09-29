@@ -1,0 +1,73 @@
+package server
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// TestItemsAPI walks the /api/v1/items resource through its whole life cycle.
+func TestItemsAPI(t *testing.T) {
+	h := newTestServer().Handler()
+
+	var created items.Item
+	rec := do(t, h, http.MethodPost, "/api/v1/items", `{"name":"first"}`, &created)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST = %d, want %d: %s", rec.Code, http.StatusCreated, rec.Body)
+	}
+	if created.ID == "" || created.Name != "first" {
+		t.Fatalf("POST body = %+v", created)
+	}
+	if got, want := rec.Header().Get("Location"), "/api/v1/items/"+created.ID; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+
+	var list struct{ Items []items.Item }
+	if rec := do(t, h, http.MethodGet, "/api/v1/items", "", &list); rec.Code != http.StatusOK || len(list.Items) != 1 {
+		t.Errorf("GET list = %d with %d items, want 200 with 1", rec.Code, len(list.Items))
+	}
+
+	var updated items.Item
+	if rec := do(t, h, http.MethodPut, "/api/v1/items/"+created.ID, `{"name":"renamed"}`, &updated); rec.Code != http.StatusOK || updated.Name != "renamed" {
+		t.Errorf("PUT = %d %+v, want 200 renamed", rec.Code, updated)
+	}
+
+	var got items.Item
+	if rec := do(t, h, http.MethodGet, "/api/v1/items/"+created.ID, "", &got); rec.Code != http.StatusOK || got.Name != "renamed" {
+		t.Errorf("GET = %d %+v, want 200 renamed", rec.Code, got)
+	}
+
+	if rec := do(t, h, http.MethodDelete, "/api/v1/items/"+created.ID, "", nil); rec.Code != http.StatusNoContent {
+		t.Errorf("DELETE = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	rec = do(t, h, http.MethodGet, "/api/v1/items/"+created.ID, "", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET after DELETE = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/problem+json") {
+		t.Errorf("error Content-Type = %q, want application/problem+json", ct)
+	}
+}
+
+func TestItemsAPIValidation(t *testing.T) {
+	h := newTestServer().Handler()
+
+	var p struct {
+		Status int    `json:"status"`
+		Detail string `json:"detail"`
+	}
+	rec := do(t, h, http.MethodPost, "/api/v1/items", `{"name":""}`, &p)
+	if rec.Code != http.StatusUnprocessableEntity || p.Status != http.StatusUnprocessableEntity {
+		t.Errorf("POST empty name = %d (body status %d), want %d", rec.Code, p.Status, http.StatusUnprocessableEntity)
+	}
+
+	if rec := do(t, h, http.MethodPut, "/api/v1/items/missing", `{"name":"x"}`, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT missing = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if rec := do(t, h, http.MethodPost, "/api/v1/items", `{not json`, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("POST malformed JSON = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}

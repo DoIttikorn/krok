@@ -1,0 +1,62 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+	"time"
+)
+
+// livez is the liveness probe. It only reports that the process can serve
+// HTTP and deliberately ignores dependencies: if it failed during a database
+// outage, Kubernetes would restart every pod at once and make things worse.
+func (s *Server) livez(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "up"})
+}
+
+// readyz is the readiness probe. It fails while the server is shutting down
+// or a dependency is down, so Kubernetes stops routing traffic to this pod
+// without restarting it.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	if s.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "shutting down"})
+		return
+	}
+	code, res := s.health(r.Context())
+	writeJSON(w, code, res)
+}
+
+// healthz reports each dependency, for people and monitoring.
+func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
+	code, res := s.health(r.Context())
+	writeJSON(w, code, res)
+}
+
+// health runs every check and reports each one as "up" or "down", plus the
+// HTTP code to answer with.
+func (s *Server) health(ctx context.Context) (int, map[string]string) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	code, res := http.StatusOK, map[string]string{"status": "up"}
+	for name, check := range s.checks {
+		if err := check(ctx); err != nil {
+			log.Printf("health check %s: %v", name, err)
+			res[name] = "down"
+			res["status"] = "down"
+			code = http.StatusServiceUnavailable
+			continue
+		}
+		res[name] = "up"
+	}
+	return code, res
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("write response: %v", err)
+	}
+}

@@ -1,0 +1,82 @@
+{{- if .HasWorker -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.K8sName}}-worker
+  labels:
+    app.kubernetes.io/name: {{.K8sName}}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{.K8sName}}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{.K8sName}}
+        app.kubernetes.io/component: worker
+{{- if .KeyVault}}
+        azure.workload.identity/use: "true"
+{{- end}}
+    spec:
+{{- if .KeyVault}}
+      serviceAccountName: {{.K8sName}}
+{{- end}}
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{.K8sName}}
+              app.kubernetes.io/component: worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: {{lower .Name}}
+          command: ["/worker"]
+          ports:
+            - name: health
+              containerPort: 8081
+{{- if .KeyVault}}
+          env:
+            - name: AZURE_KEY_VAULT_NAME
+              value: your-key-vault # TODO
+{{- end}}
+          envFrom:
+            - secretRef:
+                name: {{.K8sName}}-env
+                optional: true
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end}}

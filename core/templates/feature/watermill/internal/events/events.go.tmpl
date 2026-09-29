@@ -1,0 +1,141 @@
+// Package events publishes and subscribes to messages with Watermill, using
+// {{if eq .Watermill "kafka"}}Kafka{{else if eq .Watermill "rabbitmq"}}RabbitMQ{{else}}Redis Streams{{end}} as the broker. To switch brokers, change NewPublisher and
+// newSubscriber; handlers stay the same.
+package events
+
+import (
+	"context"
+{{- if eq .Watermill "redis"}}
+	"errors"
+{{- end}}
+	"log"
+	"log/slog"
+
+	"github.com/ThreeDotsLabs/watermill"
+{{- if eq .Watermill "kafka"}}
+	wmkafka "github.com/ThreeDotsLabs/watermill-kafka/v3/pkg/kafka"
+{{- else if eq .Watermill "rabbitmq"}}
+	wmamqp "github.com/ThreeDotsLabs/watermill-amqp/v3/pkg/amqp"
+{{- else}}
+	"github.com/ThreeDotsLabs/watermill-redisstream/pkg/redisstream"
+{{- end}}
+	"github.com/ThreeDotsLabs/watermill/message"
+{{- if eq .Watermill "kafka"}}
+
+	"{{.ModulePath}}/internal/kafka"
+{{- else if eq .Watermill "rabbitmq"}}
+
+	"{{.ModulePath}}/internal/rabbitmq"
+{{- else}}
+
+	"{{.ModulePath}}/internal/redis"
+{{- end}}
+)
+
+// Topic is the example topic RunWorker subscribes to.
+const Topic = "example.events"
+
+// Publisher publishes messages, e.g. via Publish.
+type Publisher = message.Publisher
+
+var logger = watermill.NewSlogLogger(slog.Default())
+
+// Publish sends payload to topic.
+func Publish(ctx context.Context, pub Publisher, topic string, payload []byte) error {
+	msg := message.NewMessage(watermill.NewUUID(), payload)
+	msg.SetContext(ctx)
+	return pub.Publish(topic, msg)
+}
+
+// NewPublisher connects a publisher to the broker.
+func NewPublisher() (Publisher, error) {
+{{- if eq .Watermill "kafka"}}
+	return wmkafka.NewPublisher(wmkafka.PublisherConfig{
+		Brokers:   kafka.Brokers(),
+		Marshaler: wmkafka.DefaultMarshaler{},
+	}, logger)
+{{- else if eq .Watermill "rabbitmq"}}
+	return wmamqp.NewPublisher(wmamqp.NewDurableQueueConfig(rabbitmq.URL()), logger)
+{{- else}}
+	rdb, err := redis.New()
+	if err != nil {
+		return nil, err
+	}
+	pub, err := redisstream.NewPublisher(redisstream.PublisherConfig{Client: rdb}, logger)
+	if err != nil {
+		rdb.Close()
+		return nil, err
+	}
+	return closeBoth{Publisher: pub, rdb: rdb}, nil
+{{- end}}
+}
+
+func newSubscriber() (message.Subscriber, error) {
+{{- if eq .Watermill "kafka"}}
+	return wmkafka.NewSubscriber(wmkafka.SubscriberConfig{
+		Brokers:               kafka.Brokers(),
+		Unmarshaler:           wmkafka.DefaultMarshaler{},
+		ConsumerGroup:         "{{.Name}}-watermill",
+		OverwriteSaramaConfig: wmkafka.DefaultSaramaSubscriberConfig(),
+	}, logger)
+{{- else if eq .Watermill "rabbitmq"}}
+	return wmamqp.NewSubscriber(wmamqp.NewDurableQueueConfig(rabbitmq.URL()), logger)
+{{- else}}
+	rdb, err := redis.New()
+	if err != nil {
+		return nil, err
+	}
+	sub, err := redisstream.NewSubscriber(redisstream.SubscriberConfig{
+		Client:        rdb,
+		ConsumerGroup: "{{.Name}}",
+	}, logger)
+	if err != nil {
+		rdb.Close()
+		return nil, err
+	}
+	return closeBoth{Subscriber: sub, rdb: rdb}, nil
+{{- end}}
+}
+
+// RunWorker handles messages until ctx is done. Add handlers to the router
+// here. cmd/worker calls it.
+func RunWorker(ctx context.Context) error {
+	sub, err := newSubscriber()
+	if err != nil {
+		return err
+	}
+	defer sub.Close()
+
+	router, err := message.NewRouter(message.RouterConfig{}, logger)
+	if err != nil {
+		return err
+	}
+	router.AddConsumerHandler("example", Topic, sub, handleExample)
+	return router.Run(ctx)
+}
+
+func handleExample(msg *message.Message) error {
+	log.Printf("watermill: %s: %s", msg.UUID, msg.Payload)
+	return nil
+}
+{{- if eq .Watermill "redis"}}
+
+// closeBoth closes the Redis client along with the publisher or subscriber
+// that uses it.
+type closeBoth struct {
+	message.Publisher
+	message.Subscriber
+	rdb *redis.Client
+}
+
+func (c closeBoth) Close() error {
+	var err error
+	if c.Publisher != nil {
+		err = c.Publisher.Close()
+	}
+	if c.Subscriber != nil {
+		err = errors.Join(err, c.Subscriber.Close())
+	}
+	return errors.Join(err, c.rdb.Close())
+}
+{{- end}}

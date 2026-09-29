@@ -1,0 +1,74 @@
+{{- if not (.Has "openapi") -}}
+package server
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+func (s *Server) itemRoutes(r chi.Router) {
+	r.Get("/", s.listItems)
+	r.Post("/", s.createItem)
+	r.Get("/{id}", s.getItem)
+	r.Put("/{id}", s.updateItem)
+	r.Delete("/{id}", s.deleteItem)
+}
+
+func (s *Server) listItems(w http.ResponseWriter, r *http.Request) {
+	list, err := s.items.List(r.Context())
+	if err != nil {
+		writeProblem(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, itemList{Items: list})
+}
+
+func (s *Server) createItem(w http.ResponseWriter, r *http.Request) {
+	var in items.Input
+	if err := decodeJSON(r, &in); err != nil {
+		writeProblem(w, err)
+		return
+	}
+	it, err := s.items.Create(r.Context(), in)
+	if err != nil {
+		writeProblem(w, err)
+		return
+	}
+	w.Header().Set("Location", "/api/v1/items/"+it.ID)
+	writeJSON(w, http.StatusCreated, it)
+}
+
+func (s *Server) getItem(w http.ResponseWriter, r *http.Request) {
+	it, err := s.items.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeProblem(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, it)
+}
+
+func (s *Server) updateItem(w http.ResponseWriter, r *http.Request) {
+	var in items.Input
+	if err := decodeJSON(r, &in); err != nil {
+		writeProblem(w, err)
+		return
+	}
+	it, err := s.items.Update(r.Context(), chi.URLParam(r, "id"), in)
+	if err != nil {
+		writeProblem(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, it)
+}
+
+func (s *Server) deleteItem(w http.ResponseWriter, r *http.Request) {
+	if err := s.items.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeProblem(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+{{- end}}

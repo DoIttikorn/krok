@@ -1,0 +1,95 @@
+// Package kafka produces and consumes Kafka records with franz-go.
+package kafka
+
+import (
+	"context"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+// Brokers returns the seed brokers from KAFKA_BROKERS (comma-separated).
+func Brokers() []string {
+	return strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ",")
+}
+
+// Topic is the example topic: KAFKA_TOPIC, default "events".
+func Topic() string { return getenv("KAFKA_TOPIC", "events") }
+
+// Client produces records.
+type Client struct {
+	cl *kgo.Client
+}
+
+// New creates a producer. It connects lazily, on the first request.
+func New() (*Client, error) {
+	cl, err := kgo.NewClient(kgo.SeedBrokers(Brokers()...), kgo.AllowAutoTopicCreation())
+	if err != nil {
+		return nil, err
+	}
+	return &Client{cl: cl}, nil
+}
+
+// Publish writes one record and waits until the brokers acknowledge it.
+func (c *Client) Publish(ctx context.Context, topic string, key, value []byte) error {
+	return c.cl.ProduceSync(ctx, &kgo.Record{Topic: topic, Key: key, Value: value}).FirstErr()
+}
+
+// Check pings the brokers; the server's /health uses it.
+func (c *Client) Check(ctx context.Context) error { return c.cl.Ping(ctx) }
+
+func (c *Client) Close() error {
+	c.cl.Close()
+	return nil
+}
+
+// Consume reads topics as a member of a consumer group and calls handle for
+// each record until ctx is done. Offsets are committed automatically after
+// records are polled, so a record can be delivered again after a crash.
+func Consume(ctx context.Context, group string, topics []string, handle func(context.Context, *kgo.Record) error) error {
+	cl, err := kgo.NewClient(
+		kgo.SeedBrokers(Brokers()...),
+		kgo.ConsumerGroup(group),
+		kgo.ConsumeTopics(topics...),
+		kgo.AllowAutoTopicCreation(),
+	)
+	if err != nil {
+		return err
+	}
+	defer cl.Close()
+
+	for {
+		fetches := cl.PollFetches(ctx)
+		if ctx.Err() != nil || fetches.IsClientClosed() {
+			return nil
+		}
+		fetches.EachError(func(topic string, partition int32, err error) {
+			log.Printf("kafka: fetch %s[%d]: %v", topic, partition, err)
+		})
+		fetches.EachRecord(func(r *kgo.Record) {
+			if err := handle(ctx, r); err != nil {
+				log.Printf("kafka: handle %s[%d]@%d: %v", r.Topic, r.Partition, r.Offset, err)
+			}
+		})
+	}
+}
+
+// RunWorker consumes Topic() and logs each record. Replace handleEvent with
+// your own logic. cmd/worker calls it.
+func RunWorker(ctx context.Context) error {
+	return Consume(ctx, getenv("KAFKA_GROUP", "{{.Name}}"), []string{Topic()}, handleEvent)
+}
+
+func handleEvent(ctx context.Context, r *kgo.Record) error {
+	log.Printf("kafka: %s key=%s value=%s", r.Topic, r.Key, r.Value)
+	return nil
+}
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

@@ -1,0 +1,58 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"net"
+	"os"
+	"time"
+
+	"github.com/go-sql-driver/mysql"
+)
+
+// Service is the database dependency the server uses.
+type Service interface {
+	// Check pings the database; the server's /health uses it.
+	Check(ctx context.Context) error
+	// SQL returns the underlying connection pool for queries.
+	SQL() *sql.DB
+	Close() error
+}
+
+type service struct {
+	db *sql.DB
+}
+
+// New opens a MySQL connection pool configured from environment variables.
+// It does not wait for the database to be reachable.
+func New() (Service, error) {
+	cfg := mysql.NewConfig()
+	cfg.User = getenv("DB_USERNAME", "app")
+	cfg.Passwd = getenv("DB_PASSWORD", "secret")
+	cfg.Net = "tcp"
+	cfg.Addr = net.JoinHostPort(getenv("DB_HOST", "localhost"), getenv("DB_PORT", "3306"))
+	cfg.DBName = getenv("DB_DATABASE", "{{.DBName}}")
+	cfg.ParseTime = true
+
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	return &service{db: db}, nil
+}
+
+func (s *service) Check(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+func (s *service) SQL() *sql.DB { return s.db }
+
+func (s *service) Close() error { return s.db.Close() }
+
+func getenv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v
+	}
+	return fallback
+}

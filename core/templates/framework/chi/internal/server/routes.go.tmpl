@@ -1,0 +1,31 @@
+package server
+
+import (
+	"net/http"
+
+{{- if .Has "openapi"}}
+	"github.com/danielgtaylor/huma/v2/adapters/humachi"
+{{- end}}
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+)
+
+// RegisterRoutes returns the router with every API route mounted. The
+// probes (/livez, /readyz, /health) are served by Handler.
+func (s *Server) RegisterRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.Logger, middleware.Recoverer)
+
+	r.Get("/", s.helloHandler)
+{{- if .Has "openapi"}}
+	s.registerItems(humachi.New(r, apiConfig()))
+{{- else}}
+	r.Route("/api/v1/items", s.itemRoutes)
+{{- end}}
+
+	return r
+}
+
+func (s *Server) helloHandler(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Hello World"})
+}
