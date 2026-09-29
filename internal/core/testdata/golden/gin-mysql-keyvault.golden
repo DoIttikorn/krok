@@ -58,6 +58,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # distroless/static has CA certificates and runs as a non-root user.
 FROM gcr.io/distroless/static-debian12:nonroot
+ENV GIN_MODE=release
 COPY --from=build /out/api /api
 EXPOSE 8080
 ENTRYPOINT ["/api"]
@@ -538,7 +539,9 @@ services:
     volumes:
       - db_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      # TCP on purpose: the entrypoint's temporary init server only listens on
+      # the socket, so this passes once the real server is up.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
       interval: 5s
       timeout: 5s
       retries: 20

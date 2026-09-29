@@ -12,6 +12,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # distroless/static has CA certificates and runs as a non-root user.
 FROM gcr.io/distroless/static-debian12:nonroot
+{{- if eq .Framework "gin"}}
+ENV GIN_MODE=release
+{{- end}}
 COPY --from=build /out/api /api
 {{- if .HasWorker}}
 # The worker ships in the same image; run it with entrypoint ["/worker"].
