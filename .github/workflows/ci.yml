@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit and golden tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod # the minimum supported Go
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+  e2e:
+    name: Generate and build every combination
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # Generates each project, runs go mod tidy, go vet and go test in it, and
+      # validates docker-compose.yml and deploy/k8s (Docker Compose and kubectl
+      # are preinstalled on GitHub's Ubuntu runners).
+      - run: go test ./core -run E2E -v -timeout 20m
+        env:
+          KROK_E2E: "1"

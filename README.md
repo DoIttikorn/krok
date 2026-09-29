@@ -1,6 +1,11 @@
 # krok
 
+[![CI](https://github.com/DoIttikorn/krok/actions/workflows/ci.yml/badge.svg)](https://github.com/DoIttikorn/krok/actions/workflows/ci.yml)
+
 Scaffold a ready-to-run Go API project with the framework and database you choose.
+
+> krok is at v0.x: the `core` API and the generated layout may still change
+> between minor versions. See [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 go install github.com/DoIttikorn/krok@latest
@@ -173,3 +178,7 @@ KROK_E2E=1 go test ./core -run E2E     # generate every combination, go mod tidy
                                        # and check docker-compose.yml and deploy/k8s when
                                        # Docker Compose and kubectl are installed
 ```
+
+## License
+
+[MIT](LICENSE)

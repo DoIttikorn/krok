@@ -1,0 +1,22 @@
+# Changelog
+
+krok follows [Semantic Versioning](https://semver.org). Until v1.0.0, minor
+versions may change the `core` API and the layout of generated projects.
+
+## v0.1.0
+
+First release.
+
+- `krok new` generates a Go API project, interactively with Huh prompts or
+  fully from flags.
+- Frameworks: Gin, Echo v5, Chi. Databases: PostgreSQL, MySQL, MongoDB, none.
+- Configuration from `.env`, or from Azure Key Vault with `--key-vault`.
+- Extras: `--openapi` (Huma, OpenAPI 3.1 and docs), `--redis`, `--kafka`,
+  `--rabbitmq`, `--asynq`, `--river`, `--watermill`. Consumers run in a
+  separate `cmd/worker`.
+- Every project has a REST example at `/api/v1/items`, RFC 9457 errors,
+  `/livez`, `/readyz` and `/health` probes, draining on shutdown, air live
+  reload, a Makefile, a Dockerfile, Docker Compose and Kustomize manifests
+  for highly available Kubernetes deployments.
+- `core` is a standard-library-only package other programs can use to plan
+  and generate projects.
