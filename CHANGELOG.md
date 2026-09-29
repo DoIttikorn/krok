@@ -4,7 +4,7 @@ krok follows [Semantic Versioning](https://semver.org) for its command line:
 the flags and the layout of generated projects. Until v1.0.0, minor versions
 may change them.
 
-## Unreleased
+## v0.1.1
 
 - Moved `core` to `internal/core`. krok is a command, not a library, so other
   modules can no longer import it and it can change in any release.
