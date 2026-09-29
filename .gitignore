@@ -1,3 +1,6 @@
 /krok
 *.test
 *.out
+
+# Ignore the TODO file
+TODO.md
