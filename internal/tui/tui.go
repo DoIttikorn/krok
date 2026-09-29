@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -38,18 +39,37 @@ var (
 	code    = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 )
 
-func newForm(groups ...*huh.Group) *huh.Form {
-	return huh.NewForm(groups...).
-		WithTheme(huh.ThemeFunc(huh.ThemeCharm)).
-		WithAccessible(accessible())
+// Prompter asks questions with Huh and shows a spinner while work runs. The
+// zero value uses the terminal. Setting In or Out switches Huh to accessible
+// mode, which reads plain answers line by line: that is what screen readers
+// get with ACCESSIBLE=1, and what tests use to script a session.
+type Prompter struct {
+	In  io.Reader
+	Out io.Writer
 }
 
-// accessible enables Huh's screen-reader friendly prompts when ACCESSIBLE is set.
-func accessible() bool { return os.Getenv("ACCESSIBLE") != "" }
+// accessible reports whether prompts should be line-based rather than
+// full-screen.
+func (p Prompter) accessible() bool {
+	return p.In != nil || p.Out != nil || os.Getenv("ACCESSIBLE") != ""
+}
+
+func (p Prompter) form(groups ...*huh.Group) *huh.Form {
+	f := huh.NewForm(groups...).
+		WithTheme(huh.ThemeFunc(huh.ThemeCharm)).
+		WithAccessible(p.accessible())
+	if p.In != nil {
+		f = f.WithInput(p.In)
+	}
+	if p.Out != nil {
+		f = f.WithOutput(p.Out)
+	}
+	return f
+}
 
 // Ask prompts for the selected fields and stores answers in o. It returns
 // huh.ErrUserAborted if the user cancels.
-func Ask(ctx context.Context, o *core.Options, f Fields) error {
+func (p Prompter) Ask(ctx context.Context, o *core.Options, f Fields) error {
 	if !f.Any() {
 		return nil
 	}
@@ -115,7 +135,7 @@ func Ask(ctx context.Context, o *core.Options, f Fields) error {
 			groups = append(groups, huh.NewGroup(fields...))
 		}
 	}
-	return newForm(groups...).RunWithContext(ctx)
+	return p.form(groups...).RunWithContext(ctx)
 }
 
 func options(choices []core.Choice) []huh.Option[string] {
@@ -132,9 +152,9 @@ func options(choices []core.Choice) []huh.Option[string] {
 
 // Confirm asks whether to create the project. It returns false if the user
 // declines or cancels.
-func Confirm(ctx context.Context) (bool, error) {
+func (p Prompter) Confirm(ctx context.Context) (bool, error) {
 	ok := true
-	err := newForm(huh.NewGroup(
+	err := p.form(huh.NewGroup(
 		huh.NewConfirm().
 			Title("Create project?").
 			Affirmative("Create").
@@ -144,20 +164,22 @@ func Confirm(ctx context.Context) (bool, error) {
 	return ok, err
 }
 
-// Generate runs core.Generate behind a spinner and returns the events it
-// produced so the caller can summarize them.
-func Generate(ctx context.Context, p core.Plan, dir string) ([]core.Event, error) {
-	var events []core.Event
-	err := spinner.New().
-		Title(fmt.Sprintf(" Creating %s (writing files, %s)…", p.Options.Name, stepNames(p))).
+// Spin runs action behind a spinner titled title and returns its error.
+func (p Prompter) Spin(ctx context.Context, title string, action func(context.Context) error) error {
+	s := spinner.New().
+		Title(" " + title).
 		Context(ctx).
-		WithAccessible(accessible()).
-		ActionWithErr(func(ctx context.Context) error {
-			// events is only read after Run returns, so no locking is needed.
-			return core.Generate(ctx, p, dir, func(e core.Event) { events = append(events, e) })
-		}).
-		Run()
-	return events, err
+		WithAccessible(p.accessible()).
+		ActionWithErr(action)
+	if p.Out != nil {
+		s = s.WithOutput(p.Out)
+	}
+	return s.Run()
+}
+
+// GenerateTitle describes what generating p does, for the spinner.
+func GenerateTitle(p core.Plan) string {
+	return fmt.Sprintf("Creating %s (writing files, %s)…", p.Options.Name, stepNames(p))
 }
 
 func stepNames(p core.Plan) string {
