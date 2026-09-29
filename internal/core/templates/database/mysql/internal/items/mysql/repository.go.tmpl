@@ -1,0 +1,107 @@
+// Package mysql is the MySQL adapter for the items domain.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// Repository stores items in the "items" table.
+type Repository struct {
+	db *sql.DB
+}
+
+var _ items.Repository = (*Repository)(nil)
+
+// New uses the shared pool; it doesn't open connections of its own.
+func New(db *sql.DB) *Repository { return &Repository{db: db} }
+
+// Migrate creates the table if it doesn't exist. Every replica calls it on
+// startup, which is safe: MySQL's DDL takes a metadata lock. Move to a
+// migration tool (goose, golang-migrate, Atlas) once the schema starts to
+// change.
+//
+// DATETIME(6) keeps the service's millisecond timestamps; the driver reads
+// and writes them in UTC. Update relies on the connection's clientFoundRows
+// setting (see internal/database), so an update that changes nothing still
+// counts the row as found.
+func (r *Repository) Migrate(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS items (
+		id         VARCHAR(64) PRIMARY KEY,
+		name       VARCHAR(200) NOT NULL,
+		created_at DATETIME(6) NOT NULL,
+		updated_at DATETIME(6) NOT NULL
+	)`)
+	return err
+}
+
+func (r *Repository) List(ctx context.Context) ([]items.Item, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT id, name, created_at, updated_at FROM items ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []items.Item
+	for rows.Next() {
+		it, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func (r *Repository) ByID(ctx context.Context, id string) (items.Item, error) {
+	it, err := scan(r.db.QueryRowContext(ctx, `SELECT id, name, created_at, updated_at FROM items WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return items.Item{}, fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	return it, err
+}
+
+func (r *Repository) Insert(ctx context.Context, it items.Item) error {
+	_, err := r.db.ExecContext(ctx, `INSERT INTO items (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+		it.ID, it.Name, it.CreatedAt, it.UpdatedAt)
+	return err
+}
+
+func (r *Repository) Update(ctx context.Context, it items.Item) error {
+	res, err := r.db.ExecContext(ctx, `UPDATE items SET name = ?, updated_at = ? WHERE id = ?`,
+		it.Name, it.UpdatedAt, it.ID)
+	return notFoundIfNone(res, err, it.ID)
+}
+
+func (r *Repository) Delete(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM items WHERE id = ?`, id)
+	return notFoundIfNone(res, err, id)
+}
+
+type scanner interface{ Scan(dest ...any) error }
+
+func scan(s scanner) (items.Item, error) {
+	var it items.Item
+	if err := s.Scan(&it.ID, &it.Name, &it.CreatedAt, &it.UpdatedAt); err != nil {
+		return items.Item{}, err
+	}
+	it.CreatedAt, it.UpdatedAt = it.CreatedAt.UTC(), it.UpdatedAt.UTC()
+	return it, nil
+}
+
+func notFoundIfNone(res sql.Result, err error, id string) error {
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", items.ErrNotFound, id)
+	}
+	return nil
+}

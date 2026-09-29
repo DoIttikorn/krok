@@ -66,13 +66,39 @@ Errors use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem details
 (`application/problem+json`): `400` for malformed JSON, `404` for unknown IDs,
 `422` for invalid input.
 
-`items` is an example resource kept **in memory** (`internal/items`): each
-replica has its own copy. Implement `items.Store` with your database before
-running more than one replica, then use it as a template for your own
-resources.
-{{- if .Has "openapi"}} Routes are registered with [Huma](https://huma.rocks)
-in `internal/server/openapi.go`; Huma validates requests against the Go types
-and generates the spec from them.
+## Domains: ports and adapters
+
+`items` is an example domain. Copy its layout for your own, e.g.
+`internal/order`:
+
+```
+internal/items/
+├── items.go          model, errors, input validation
+├── service.go        business rules (Service)
+├── repository.go     Repository interface: the only view of storage
+├── memory/           in-process adapter; also the test double
+{{- if .HasDB}}
+├── {{printf "%-18s" (print .Database "/")}}{{.Database}} adapter{{if ne .Database "mongodb"}}; creates its table on startup{{end}}
+{{- end}}
+├── itemstest/        contract every Repository adapter must pass
+└── handler/          REST adapter{{if .Has "openapi"}}, registered with Huma{{end}}
+```
+
+- The domain package imports no database driver and no web framework.
+  Adapters import the domain, never the other way round.
+- `internal/server/server.go` is the one place that picks adapters: it
+  builds {{if .HasDB}}the {{.Database}}{{else}}the memory{{end}} repository and hands it to `items.NewService`.
+- Service tests run against the memory adapter. That is safe because every
+  adapter passes the same contract in `itemstest`: `make test` runs it for
+  memory{{if .HasDB}}, and `make deps-up && make test-integration` runs it against the real
+  {{.Database}}{{end}}.
+{{- if not .HasDB}}
+- The memory adapter keeps items per process and loses them on restart, so
+  choose a database before running more than one replica.
+{{- end}}
+{{- if .Has "openapi"}}
+- The handler registers its routes with [Huma](https://huma.rocks), which
+  validates requests against the Go types and generates the OpenAPI spec.
 {{- end}}
 
 ## Make targets
@@ -86,6 +112,7 @@ and generates the spec from them.
 {{- end}}
 | `make build` | Build every command into `bin/` |
 | `make test` | Run tests |
+| `make test-integration` | Run tests, including the repository contract against the real database (`make deps-up` first) |
 | `make tidy` | Tidy `go.mod` |
 | `make clean` | Remove build output |
 | `make docker-build` | Build the Docker image `{{lower .Name}}` |

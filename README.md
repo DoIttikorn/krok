@@ -52,7 +52,11 @@ my-api/
 ├── cmd/api/main.go            entry point; drains on SIGTERM for rolling updates
 ├── internal/config/           loads settings: .env, or Azure Key Vault with --key-vault
 ├── internal/server/           routes, probes (/livez, /readyz, /health), RFC 9457 errors
-├── internal/items/            example REST resource (/api/v1/items): model, Store, in-memory store
+├── internal/items/            example domain (/api/v1/items), ports and adapters:
+│   ├── memory/, postgres/ …   repository adapters, one per store
+│   ├── itemstest/             contract every adapter must pass
+│   └── handler/               REST adapter for the chosen framework
+├── internal/httpx/            JSON and RFC 9457 helpers for handlers
 ├── internal/database/         connection + health check (if a database is chosen)
 ├── internal/redis, kafka, …   one package per extra (--redis, --kafka, …)
 ├── cmd/worker/main.go         background consumers, when an extra needs one
@@ -68,10 +72,21 @@ my-api/
 
 Every project serves a CRUD example at `/api/v1/items` (`GET`, `POST` → `201`
 with `Location`, `GET`/`PUT`/`DELETE` by ID) with RFC 9457 problem details for
-errors. Handlers depend on the `items.Store` interface; the in-memory store is
-only for trying it out. With `--openapi` the same routes are registered with
-Huma, which validates requests from the Go types and serves the spec at
-`/openapi.json` and docs at `/docs`, for Gin, Echo and Chi alike.
+errors. `items` is laid out as ports and adapters, as a model for your own
+domains:
+
+- the domain package (`internal/items`) holds the model, the `Service` and
+  the `Repository` interface, and imports no driver or framework;
+- `memory` and the adapter for the chosen database (`postgres`, `mysql` or
+  `mongodb`, with a real table or collection) implement `Repository`;
+  `internal/server` is the one place that picks which;
+- `itemstest` is the contract every adapter must pass. It runs for the memory
+  adapter in `make test` and against the real database in
+  `make test-integration`, so the service can be tested with the memory
+  adapter and trusted with the real one;
+- `handler` is the REST adapter. With `--openapi` it registers the routes with
+  Huma, which validates requests from the Go types and serves the spec at
+  `/openapi.json` and docs at `/docs`, for Gin, Echo and Chi alike.
 
 The probes are mounted outside the framework router:
 
@@ -181,6 +196,9 @@ go test ./internal/core -update                # rewrite golden files after chan
 KROK_E2E=1 go test ./internal/core -run E2E    # generate every combination: go mod tidy, vet and
                                                # test each, and check docker-compose.yml and
                                                # deploy/k8s when Docker Compose and kubectl exist
+KROK_E2E=1 KROK_E2E_DOCKER=1 go test ./internal/core -run E2E
+                                               # also run each database adapter's contract
+                                               # against a real database in Docker
 ```
 
 ## License

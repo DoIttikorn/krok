@@ -1,0 +1,13 @@
+package memory_test
+
+import (
+	"testing"
+
+	"{{.ModulePath}}/internal/items"
+	"{{.ModulePath}}/internal/items/itemstest"
+	"{{.ModulePath}}/internal/items/memory"
+)
+
+func TestContract(t *testing.T) {
+	itemstest.Run(t, func(t *testing.T) items.Repository { return memory.New() })
+}

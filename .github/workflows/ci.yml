@@ -44,9 +44,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-      # Generates each project, runs go mod tidy, go vet and go test in it, and
-      # validates docker-compose.yml and deploy/k8s (Docker Compose and kubectl
-      # are preinstalled on GitHub's Ubuntu runners).
+      # Generates each project, runs go mod tidy, go vet and go test in it,
+      # validates docker-compose.yml and deploy/k8s, and runs each database
+      # adapter's contract against a real database. Docker, Docker Compose and
+      # kubectl are preinstalled on GitHub's Ubuntu runners.
       - run: go test ./internal/core -run E2E -v -timeout 20m
         env:
           KROK_E2E: "1"
+          KROK_E2E_DOCKER: "1"

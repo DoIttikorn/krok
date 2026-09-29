@@ -1,0 +1,26 @@
+package items
+
+import "context"
+
+// Repository is the persistence port: the service's only view of storage.
+//
+// It is declared here, next to the service that uses it, so the domain
+// never depends on a database. Every implementation must pass the contract
+// in itemstest; that is what makes adapters interchangeable.
+type Repository interface {
+	// List returns every item, oldest first (by CreatedAt, then ID).
+	List(ctx context.Context) ([]Item, error)
+
+	// ByID returns one item, or an error wrapping ErrNotFound.
+	ByID(ctx context.Context, id string) (Item, error)
+
+	// Insert stores a new item. The service has already set every field.
+	Insert(ctx context.Context, it Item) error
+
+	// Update replaces the name and UpdatedAt of an existing item, or returns
+	// an error wrapping ErrNotFound.
+	Update(ctx context.Context, it Item) error
+
+	// Delete removes an item, or returns an error wrapping ErrNotFound.
+	Delete(ctx context.Context, id string) error
+}

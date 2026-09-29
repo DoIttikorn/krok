@@ -1,0 +1,71 @@
+package items_test
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"{{.ModulePath}}/internal/items"
+	"{{.ModulePath}}/internal/items/memory"
+)
+
+// The service is tested against the memory adapter. It passes the same
+// contract as the real one (see itemstest), so no database is needed here.
+func newService() items.Service { return items.NewService(memory.New()) }
+
+func TestCreateTrimsAndStamps(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+
+	it, err := svc.Create(ctx, items.Input{Name: "  first  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.ID == "" || it.Name != "first" {
+		t.Errorf("Create = %+v, want an ID and a trimmed name", it)
+	}
+	if it.CreatedAt.IsZero() || !it.CreatedAt.Equal(it.UpdatedAt) {
+		t.Errorf("timestamps = %v / %v, want equal and set", it.CreatedAt, it.UpdatedAt)
+	}
+	got, err := svc.Get(ctx, it.ID)
+	if err != nil || got != it {
+		t.Errorf("Get = %+v, %v; want %+v", got, err, it)
+	}
+}
+
+func TestUpdateKeepsCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+	it, err := svc.Create(ctx, items.Input{Name: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := svc.Update(ctx, it.ID, items.Input{Name: "renamed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "renamed" || !updated.CreatedAt.Equal(it.CreatedAt) {
+		t.Errorf("Update = %+v, want new name and the original CreatedAt", updated)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+	for _, name := range []string{"", "   ", strings.Repeat("x", items.MaxNameLength+1)} {
+		if _, err := svc.Create(ctx, items.Input{Name: name}); !errors.Is(err, items.ErrInvalid) {
+			t.Errorf("Create(%q): err = %v, want ErrInvalid", name, err)
+		}
+	}
+	if _, err := svc.Update(ctx, "missing", items.Input{Name: "x"}); !errors.Is(err, items.ErrNotFound) {
+		t.Errorf("Update missing: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListIsNeverNil(t *testing.T) {
+	list, err := newService().List(context.Background())
+	if err != nil || list == nil {
+		t.Errorf("List = %#v, %v; want an empty, non-nil slice", list, err)
+	}
+}

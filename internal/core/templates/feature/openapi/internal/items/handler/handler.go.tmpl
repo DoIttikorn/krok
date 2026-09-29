@@ -1,0 +1,136 @@
+// Package handler is the REST adapter for the items domain, registered with
+// Huma: Huma validates requests against these types and documents them in
+// the OpenAPI spec, and this package maps domain errors to RFC 9457 problems.
+package handler
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+
+	"github.com/danielgtaylor/huma/v2"
+
+	"{{.ModulePath}}/internal/items"
+)
+
+// BasePath is where these operations live.
+const BasePath = "/api/v1/items"
+
+// Service is the slice of items.Service these endpoints need. It is declared
+// here, where it is used, so handler tests can pass a fake.
+type Service interface {
+	List(ctx context.Context) ([]items.Item, error)
+	Get(ctx context.Context, id string) (items.Item, error)
+	Create(ctx context.Context, in items.Input) (items.Item, error)
+	Update(ctx context.Context, id string, in items.Input) (items.Item, error)
+	Delete(ctx context.Context, id string) error
+}
+
+// Handler serves BasePath.
+type Handler struct {
+	svc Service
+}
+
+func New(svc Service) *Handler { return &Handler{svc: svc} }
+
+// Request and response shapes. Body is the JSON body; other fields map to
+// path parameters and headers through their tags.
+type (
+	idInput struct {
+		ID string `path:"id" doc:"Item ID"`
+	}
+	createInput struct {
+		Body items.Input
+	}
+	updateInput struct {
+		ID   string `path:"id" doc:"Item ID"`
+		Body items.Input
+	}
+	itemOutput struct {
+		Body items.Item
+	}
+	createdOutput struct {
+		Location string `header:"Location" doc:"URL of the new item"`
+		Body     items.Item
+	}
+	listOutput struct {
+		Body struct {
+			Items []items.Item `json:"items"`
+		}
+	}
+)
+
+// Register adds the operations to api.
+func (h *Handler) Register(api huma.API) {
+	tags := []string{"Items"}
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-items", Method: http.MethodGet, Path: BasePath,
+		Summary: "List items", Tags: tags,
+	}, func(ctx context.Context, _ *struct{}) (*listOutput, error) {
+		list, err := h.svc.List(ctx)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		out := &listOutput{}
+		out.Body.Items = list
+		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "create-item", Method: http.MethodPost, Path: BasePath,
+		Summary: "Create an item", Tags: tags, DefaultStatus: http.StatusCreated,
+	}, func(ctx context.Context, in *createInput) (*createdOutput, error) {
+		it, err := h.svc.Create(ctx, in.Body)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		return &createdOutput{Location: BasePath + "/" + it.ID, Body: it}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-item", Method: http.MethodGet, Path: BasePath + "/{id}",
+		Summary: "Get an item", Tags: tags,
+	}, func(ctx context.Context, in *idInput) (*itemOutput, error) {
+		it, err := h.svc.Get(ctx, in.ID)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		return &itemOutput{Body: it}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "update-item", Method: http.MethodPut, Path: BasePath + "/{id}",
+		Summary: "Replace an item", Tags: tags,
+	}, func(ctx context.Context, in *updateInput) (*itemOutput, error) {
+		it, err := h.svc.Update(ctx, in.ID, in.Body)
+		if err != nil {
+			return nil, apiError(err)
+		}
+		return &itemOutput{Body: it}, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "delete-item", Method: http.MethodDelete, Path: BasePath + "/{id}",
+		Summary: "Delete an item", Tags: tags, DefaultStatus: http.StatusNoContent,
+	}, func(ctx context.Context, in *idInput) (*struct{}, error) {
+		if err := h.svc.Delete(ctx, in.ID); err != nil {
+			return nil, apiError(err)
+		}
+		return nil, nil
+	})
+}
+
+// apiError maps domain errors to problem responses. Unexpected errors are
+// logged, and their details are not sent to the client.
+func apiError(err error) error {
+	switch {
+	case errors.Is(err, items.ErrNotFound):
+		return huma.Error404NotFound(err.Error())
+	case errors.Is(err, items.ErrInvalid):
+		return huma.Error422UnprocessableEntity(err.Error())
+	}
+	log.Printf("items: %v", err)
+	return huma.Error500InternalServerError("")
+}

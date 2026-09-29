@@ -1,4 +1,4 @@
-.PHONY: run watch build test tidy clean docker-build up down logs k8s k8s-apply{{if .HasWorker}} run-worker{{end}}{{if .Services}} deps-up{{end}}
+.PHONY: run watch build test test-integration tidy clean docker-build up down logs k8s k8s-apply{{if .HasWorker}} run-worker{{end}}{{if .Services}} deps-up{{end}}
 
 IMAGE := {{lower .Name}}
 
@@ -22,6 +22,11 @@ build:
 
 test:
 	go test ./...
+
+# Runs the repository contract against the real database too. Start it
+# first with "make deps-up".
+test-integration:
+	INTEGRATION=1 go test ./...
 
 tidy:
 	go mod tidy

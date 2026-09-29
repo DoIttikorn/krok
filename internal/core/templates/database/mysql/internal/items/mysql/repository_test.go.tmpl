@@ -1,0 +1,36 @@
+package mysql
+
+import (
+	"context"
+	"os"
+	"testing"
+
+	"{{.ModulePath}}/internal/database"
+	"{{.ModulePath}}/internal/items"
+	"{{.ModulePath}}/internal/items/itemstest"
+)
+
+// TestContract runs the Repository contract against a real MySQL:
+//
+//	make deps-up && make test-integration
+func TestContract(t *testing.T) {
+	if os.Getenv("INTEGRATION") == "" {
+		t.Skip("set INTEGRATION=1 with the database running (make deps-up)")
+	}
+	ctx := context.Background()
+	db, err := database.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	repo := New(db.SQL())
+	if err := repo.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	itemstest.Run(t, func(t *testing.T) items.Repository {
+		if _, err := db.SQL().ExecContext(ctx, `DELETE FROM items`); err != nil {
+			t.Fatal(err)
+		}
+		return repo
+	})
+}

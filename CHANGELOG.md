@@ -4,6 +4,17 @@ krok follows [Semantic Versioning](https://semver.org) for its command line:
 the flags and the layout of generated projects. Until v1.0.0, minor versions
 may change them.
 
+## Unreleased
+
+- The `items` example is laid out as ports and adapters: the domain package
+  holds the model, `Service` and `Repository` interface; `memory`,
+  `postgres`, `mysql` and `mongodb` adapters store items in a real table or
+  collection; `itemstest` is a contract every adapter must pass (run against
+  the real database with `make test-integration`); `handler` is the REST
+  adapter. Shared HTTP helpers moved to `internal/httpx`.
+- MySQL connections report rows matched rather than changed
+  (`clientFoundRows`), so updating an item with the same values succeeds.
+
 ## v0.1.1
 
 - Moved `core` to `internal/core`. krok is a command, not a library, so other

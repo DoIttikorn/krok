@@ -213,18 +213,24 @@ func TestPlanLayers(t *testing.T) {
 	always := []string{
 		".air.toml", ".dockerignore", ".env", ".gitignore", "Dockerfile", "Makefile", "README.md",
 		"docker-compose.yml", "go.mod", "cmd/api/main.go", "internal/config/config.go",
-		"internal/items/items.go", "internal/server/health.go",
+		"internal/httpx/httpx.go", "internal/server/health.go",
+		"internal/items/items.go", "internal/items/repository.go", "internal/items/service.go",
+		"internal/items/memory/memory.go", "internal/items/itemstest/itemstest.go",
+		"internal/items/handler/handler.go",
 		"internal/server/routes.go", "internal/server/server.go",
 		"deploy/k8s/kustomization.yaml", "deploy/k8s/deployment.yaml", "deploy/k8s/service.yaml",
 		"deploy/k8s/ingress.yaml", "deploy/k8s/pdb.yaml", "deploy/k8s/hpa.yaml",
 	}
 
 	check("postgres", paths(Options{Name: "api", Framework: "chi", Database: "postgres"}),
-		append(always, "internal/database/database.go", "internal/server/items.go", "internal/server/respond.go"),
-		[]string{"internal/config/config_test.go", "internal/server/openapi.go", "deploy/k8s/worker-deployment.yaml"})
+		append(always, "internal/database/database.go", "internal/items/postgres/repository.go", "internal/items/postgres/repository_test.go"),
+		[]string{"internal/config/config_test.go", "internal/server/openapi.go", "deploy/k8s/worker-deployment.yaml", "internal/items/mongodb/repository.go"})
+	check("mongodb", paths(Options{Name: "api", Framework: "echo", Database: "mongodb"}),
+		append(always, "internal/items/mongodb/repository.go"),
+		[]string{"internal/items/postgres/repository.go"})
 	check("openapi", paths(Options{Name: "api", Framework: "gin", Database: "none", Features: []string{"openapi"}}),
 		append(always, "internal/server/openapi.go"),
-		[]string{"internal/server/items.go", "internal/server/respond.go"})
+		[]string{"internal/items/postgres/repository.go"})
 	check("no database", paths(Options{Name: "api", Framework: "chi", Database: "none"}),
 		always,
 		[]string{"internal/database/database.go"})
@@ -252,6 +258,31 @@ func TestK8sName(t *testing.T) {
 	}
 }
 
+// The framework layer and the openapi layer both offer
+// internal/items/handler/handler.go; exactly one of them renders it.
+func TestItemsHandlerVariant(t *testing.T) {
+	content := func(o Options) string {
+		t.Helper()
+		p, err := BuildPlan(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range p.Files {
+			if f.Path == "internal/items/handler/handler.go" {
+				return string(f.Content)
+			}
+		}
+		t.Fatalf("%+v: no handler", o)
+		return ""
+	}
+	if c := content(Options{Name: "api", Framework: "echo", Database: "none"}); !strings.Contains(c, "*echo.Group") {
+		t.Error("echo project without openapi should get the Echo handler")
+	}
+	if c := content(Options{Name: "api", Framework: "echo", Database: "none", Features: []string{"openapi"}}); !strings.Contains(c, "huma.Register") || strings.Contains(c, "echo.Group") {
+		t.Error("echo project with openapi should get the Huma handler only")
+	}
+}
+
 func TestTemplateData(t *testing.T) {
 	o, err := Normalize(Options{Name: "api", Framework: "chi", Database: "postgres", Features: []string{"watermill", "redis", "rabbitmq"}})
 	if err != nil {
@@ -267,6 +298,12 @@ func TestTemplateData(t *testing.T) {
 	if NewTemplateData(Options{Name: "api", Framework: "chi", Database: "none", Features: []string{"openapi"}}).HasDeps {
 		t.Error("openapi alone should not count as an external dependency")
 	}
+	if d.ItemsStore != "postgres" {
+		t.Errorf("ItemsStore = %q, want postgres", d.ItemsStore)
+	}
+	if got := NewTemplateData(Options{Name: "api", Framework: "chi", Database: "none"}).ItemsStore; got != "memory" {
+		t.Errorf("ItemsStore without a database = %q, want memory", got)
+	}
 	if d.Watermill != "rabbitmq" {
 		t.Errorf("Watermill = %q, want rabbitmq (preferred over redis)", d.Watermill)
 	}
@@ -278,6 +315,8 @@ func TestEmptyTemplateSkipsFile(t *testing.T) {
 		"base/skip.txt.tmpl":      {Data: []byte("{{if .HasWorker}}worker{{end}}\n")},
 		"framework/chi/a.go.tmpl": {Data: []byte("package a\n")},
 		"config/env/b.txt.tmpl":   {Data: []byte("b")},
+		// Same output path as base/keep.txt.tmpl, but renders empty: allowed.
+		"framework/chi/keep.txt.tmpl": {Data: []byte("{{if .HasWorker}}other{{end}}")},
 	}
 	p, err := BuildPlanFS(tfs, Options{Name: "api", Framework: "chi", Database: "none"})
 	if err != nil {

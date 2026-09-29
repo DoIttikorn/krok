@@ -7,6 +7,8 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 {{- end}}
 	"github.com/gin-gonic/gin"
+
+	itemshandler "{{.ModulePath}}/internal/items/handler"
 )
 
 // RegisterRoutes returns the router with every API route mounted. The
@@ -17,9 +19,10 @@ func (s *Server) RegisterRoutes() http.Handler {
 
 	r.GET("/", s.helloHandler)
 {{- if .Has "openapi"}}
-	s.registerItems(humagin.New(r, apiConfig()))
+	api := humagin.New(r, apiConfig())
+	itemshandler.New(s.items).Register(api)
 {{- else}}
-	s.itemRoutes(r.Group("/api/v1/items"))
+	itemshandler.New(s.items).Register(r.Group(itemshandler.BasePath))
 {{- end}}
 
 	return r

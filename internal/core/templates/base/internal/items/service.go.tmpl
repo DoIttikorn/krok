@@ -1,0 +1,82 @@
+package items
+
+import (
+	"context"
+	"crypto/rand"
+	"strings"
+	"time"
+)
+
+// Service is everything the items domain can do. Handlers depend on it,
+// never on a Repository directly.
+type Service interface {
+	List(ctx context.Context) ([]Item, error)
+	Get(ctx context.Context, id string) (Item, error)
+	Create(ctx context.Context, in Input) (Item, error)
+	Update(ctx context.Context, id string, in Input) (Item, error)
+	Delete(ctx context.Context, id string) error
+}
+
+type service struct {
+	repo Repository
+	now  func() time.Time
+}
+
+var _ Service = (*service)(nil)
+
+// NewService wires the domain to a Repository adapter.
+func NewService(repo Repository) Service {
+	return &service{repo: repo, now: now}
+}
+
+// now is truncated to milliseconds, the finest precision every supported
+// store keeps, so an item reads back exactly as it was written.
+func now() time.Time { return time.Now().UTC().Truncate(time.Millisecond) }
+
+// newID returns a random ID. It is minted here rather than by the store, so
+// its format doesn't depend on which database is behind the Repository.
+func newID() string { return rand.Text() }
+
+func (s *service) List(ctx context.Context) ([]Item, error) {
+	list, err := s.repo.List(ctx)
+	if list == nil && err == nil {
+		list = []Item{} // encode as [] rather than null
+	}
+	return list, err
+}
+
+func (s *service) Get(ctx context.Context, id string) (Item, error) {
+	return s.repo.ByID(ctx, id)
+}
+
+func (s *service) Create(ctx context.Context, in Input) (Item, error) {
+	if err := in.Validate(); err != nil {
+		return Item{}, err
+	}
+	t := s.now()
+	it := Item{ID: newID(), Name: strings.TrimSpace(in.Name), CreatedAt: t, UpdatedAt: t}
+	if err := s.repo.Insert(ctx, it); err != nil {
+		return Item{}, err
+	}
+	return it, nil
+}
+
+func (s *service) Update(ctx context.Context, id string, in Input) (Item, error) {
+	if err := in.Validate(); err != nil {
+		return Item{}, err
+	}
+	it, err := s.repo.ByID(ctx, id)
+	if err != nil {
+		return Item{}, err
+	}
+	it.Name = strings.TrimSpace(in.Name)
+	it.UpdatedAt = s.now()
+	if err := s.repo.Update(ctx, it); err != nil {
+		return Item{}, err
+	}
+	return it, nil
+}
+
+func (s *service) Delete(ctx context.Context, id string) error {
+	return s.repo.Delete(ctx, id)
+}

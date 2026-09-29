@@ -8,12 +8,13 @@ import (
 	"testing"
 
 	"{{.ModulePath}}/internal/items"
+	"{{.ModulePath}}/internal/items/memory"
 )
 
 // newTestServer returns a Server without external dependencies, so every
-// health check passes.
+// health check passes. Items are kept by the memory adapter.
 func newTestServer() *Server {
-	return &Server{items: items.NewMemoryStore()}
+	return &Server{items: items.NewService(memory.New())}
 }
 
 // do sends a request through the full handler and decodes a JSON response

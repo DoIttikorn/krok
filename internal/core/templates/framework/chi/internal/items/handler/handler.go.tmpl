@@ -1,0 +1,123 @@
+{{- if not (.Has "openapi") -}}
+// Package handler is the REST adapter for the items domain: it turns HTTP
+// requests into Service calls and domain errors into RFC 9457 responses.
+package handler
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+
+	"{{.ModulePath}}/internal/httpx"
+	"{{.ModulePath}}/internal/items"
+)
+
+// Service is the slice of items.Service these endpoints need. It is declared
+// here, where it is used, so handler tests can pass a fake.
+type Service interface {
+	List(ctx context.Context) ([]items.Item, error)
+	Get(ctx context.Context, id string) (items.Item, error)
+	Create(ctx context.Context, in items.Input) (items.Item, error)
+	Update(ctx context.Context, id string, in items.Input) (items.Item, error)
+	Delete(ctx context.Context, id string) error
+}
+
+// BasePath is where the server mounts these routes.
+const BasePath = "/api/v1/items"
+
+// Handler serves BasePath.
+type Handler struct {
+	svc Service
+}
+
+func New(svc Service) *Handler { return &Handler{svc: svc} }
+
+// itemList is the body of GET BasePath. An object rather than a bare
+// array leaves room for pagination fields later.
+type itemList struct {
+	Items []items.Item `json:"items"`
+}
+
+// fail writes the problem response that matches err. Unexpected errors are
+// logged, and their details are not sent to the client.
+func fail(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, httpx.ErrBadRequest):
+		httpx.WriteProblem(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, items.ErrNotFound):
+		httpx.WriteProblem(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, items.ErrInvalid):
+		httpx.WriteProblem(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		log.Printf("items: %v", err)
+		httpx.WriteProblem(w, http.StatusInternalServerError, "")
+	}
+}
+
+// Register mounts the routes, e.g. r.Route(handler.BasePath, h.Register).
+func (h *Handler) Register(r chi.Router) {
+	r.Get("/", h.list)
+	r.Post("/", h.create)
+	r.Get("/{id}", h.get)
+	r.Put("/{id}", h.update)
+	r.Delete("/{id}", h.delete)
+}
+
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	list, err := h.svc.List(r.Context())
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, itemList{Items: list})
+}
+
+func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	var in items.Input
+	if err := httpx.DecodeJSON(r, &in); err != nil {
+		fail(w, err)
+		return
+	}
+	it, err := h.svc.Create(r.Context(), in)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	w.Header().Set("Location", BasePath+"/"+it.ID)
+	httpx.JSON(w, http.StatusCreated, it)
+}
+
+func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
+	it, err := h.svc.Get(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, it)
+}
+
+func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+	var in items.Input
+	if err := httpx.DecodeJSON(r, &in); err != nil {
+		fail(w, err)
+		return
+	}
+	it, err := h.svc.Update(r.Context(), chi.URLParam(r, "id"), in)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, it)
+}
+
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	if err := h.svc.Delete(r.Context(), chi.URLParam(r, "id")); err != nil {
+		fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+{{- end}}
