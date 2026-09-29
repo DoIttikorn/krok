@@ -19,6 +19,7 @@ type Catalog struct {
 	Frameworks []Choice
 	Databases  []Choice
 	Configs    []Choice // where the generated app reads its settings from
+	Loggers    []Choice // what the app's *slog.Logger writes through
 	Features   []Choice // optional extras; any number can be enabled
 }
 
@@ -35,6 +36,11 @@ const (
 
 	ConfigEnv      = "env"
 	ConfigKeyVault = "keyvault"
+
+	LoggerSlog    = "slog"
+	LoggerZap     = "zap"
+	LoggerZerolog = "zerolog"
+	LoggerCharm   = "charm"
 
 	FeatureOpenAPI   = "openapi"
 	FeatureRedis     = "redis"
@@ -63,6 +69,12 @@ func DefaultCatalog() Catalog {
 			{ID: ConfigEnv, Name: ".env file", Description: "Environment variables, loaded from .env if present"},
 			{ID: ConfigKeyVault, Name: "Azure Key Vault", Description: "Secrets from Azure Key Vault, named by AZURE_KEY_VAULT_NAME"},
 		},
+		Loggers: []Choice{
+			{ID: LoggerSlog, Name: "slog", Description: "Standard library handlers, no dependency"},
+			{ID: LoggerZap, Name: "zap", Description: "Uber's zap, through zapslog"},
+			{ID: LoggerZerolog, Name: "zerolog", Description: "rs/zerolog, through slog-zerolog"},
+			{ID: LoggerCharm, Name: "charm", Description: "charmbracelet/log: colorful text, or JSON"},
+		},
 		Features: []Choice{
 			{ID: FeatureOpenAPI, Name: "OpenAPI", Description: "Typed routes with Huma: OpenAPI 3.1 spec and docs at /docs"},
 			{ID: FeatureRedis, Name: "Redis", Description: "Redis client (go-redis v9)"},
@@ -77,13 +89,15 @@ func DefaultCatalog() Catalog {
 
 // aliases maps alternative spellings users may type to canonical IDs.
 var aliases = map[string]string{
-	"postgresql": DatabasePostgres,
-	"pg":         DatabasePostgres,
-	"mongo":      DatabaseMongoDB,
-	"mariadb":    DatabaseMySQL,
-	"key-vault":  ConfigKeyVault,
-	"akv":        ConfigKeyVault,
-	"rabbit":     FeatureRabbitMQ,
+	"postgresql":    DatabasePostgres,
+	"pg":            DatabasePostgres,
+	"mongo":         DatabaseMongoDB,
+	"mariadb":       DatabaseMySQL,
+	"key-vault":     ConfigKeyVault,
+	"akv":           ConfigKeyVault,
+	"rabbit":        FeatureRabbitMQ,
+	"charmlog":      LoggerCharm,
+	"charmbracelet": LoggerCharm,
 }
 
 // IDs returns the IDs of the given choices, in order.

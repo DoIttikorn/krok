@@ -3,12 +3,13 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"sync/atomic"
 	"time"
 
+	"{{.ModulePath}}/internal/httpx"
 	"{{.ModulePath}}/internal/items"
 	itemstore "{{.ModulePath}}/internal/items/{{.ItemsStore}}"
 {{- if .HasDB}}
@@ -37,6 +38,7 @@ import (
 
 // Server is the HTTP server and the dependencies its handlers need.
 type Server struct {
+	log           *slog.Logger
 	srv           *http.Server
 	draining      atomic.Bool   // set by Shutdown; fails /readyz
 	shutdownDelay time.Duration // SHUTDOWN_DELAY, see Shutdown
@@ -69,14 +71,15 @@ type Server struct {
 {{- end}}
 }
 
-// New connects the dependencies and builds the HTTP server. Call Close when
-// done to release them.
-func New(ctx context.Context) (*Server, error) {
+// New connects the dependencies and builds the HTTP server, logging through
+// log. Call Close when done to release the dependencies.
+func New(ctx context.Context, log *slog.Logger) (*Server, error) {
 	delay, err := time.ParseDuration(getenv("SHUTDOWN_DELAY", "0s"))
 	if err != nil {
 		return nil, fmt.Errorf("SHUTDOWN_DELAY: %w", err)
 	}
 	s := &Server{
+		log:           log,
 		shutdownDelay: delay,
 		checks:        map[string]func(context.Context) error{},
 	}
@@ -147,7 +150,7 @@ func New(ctx context.Context) (*Server, error) {
 {{- end}}
 {{- if .Has "river"}}
 
-	jc, err := jobs.New(ctx)
+	jc, err := jobs.New(ctx, log)
 	if err != nil {
 		return fail("start river client", err)
 	}
@@ -156,7 +159,7 @@ func New(ctx context.Context) (*Server, error) {
 {{- end}}
 {{- if .Has "watermill"}}
 
-	pub, err := events.NewPublisher()
+	pub, err := events.NewPublisher(log)
 	if err != nil {
 		return fail("create watermill publisher", err)
 	}
@@ -176,13 +179,14 @@ func New(ctx context.Context) (*Server, error) {
 }
 
 // Handler serves the probes and the API. The probes are mounted outside the
-// framework router so they stay cheap and don't fill the request log.
+// framework router and the request log, so they stay cheap and quiet. The
+// API gets one request logger for every framework (httpx.Log).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", s.livez)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /health", s.healthz)
-	mux.Handle("/", s.RegisterRoutes())
+	mux.Handle("/", httpx.Log(s.log)(s.RegisterRoutes()))
 	return mux
 }
 
@@ -199,7 +203,7 @@ func (s *Server) ListenAndServe() error { return s.srv.ListenAndServe() }
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.draining.Store(true)
 	if s.shutdownDelay > 0 {
-		log.Printf("draining for %s", s.shutdownDelay)
+		s.log.Info("draining", "delay", s.shutdownDelay)
 		select {
 		case <-time.After(s.shutdownDelay):
 		case <-ctx.Done():
@@ -213,7 +217,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) Close() {
 	for i := len(s.closers) - 1; i >= 0; i-- {
 		if err := s.closers[i](); err != nil {
-			log.Printf("close: %v", err)
+			s.log.Error("close dependency", "error", err)
 		}
 	}
 }

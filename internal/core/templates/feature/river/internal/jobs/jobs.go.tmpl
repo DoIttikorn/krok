@@ -3,7 +3,7 @@ package jobs
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,10 +26,11 @@ func (ExampleArgs) Kind() string { return "example" }
 // ExampleWorker works ExampleArgs jobs.
 type ExampleWorker struct {
 	river.WorkerDefaults[ExampleArgs]
+	log *slog.Logger
 }
 
 func (w *ExampleWorker) Work(ctx context.Context, job *river.Job[ExampleArgs]) error {
-	log.Printf("river: job %d: %s", job.ID, job.Args.Message)
+	w.log.InfoContext(ctx, "job", "id", job.ID, "message", job.Args.Message)
 	return nil
 }
 
@@ -41,13 +42,13 @@ type Client struct {
 }
 
 // New connects to PostgreSQL with the DB_* settings, applies River's
-// migrations and returns an insert-only client.
-func New(ctx context.Context) (*Client, error) {
+// migrations and returns an insert-only client that logs through log.
+func New(ctx context.Context, log *slog.Logger) (*Client, error) {
 	pool, err := connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
+	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{Logger: log})
 	if err != nil {
 		pool.Close()
 		return nil, err
@@ -61,7 +62,7 @@ func (c *Client) Close() error {
 }
 
 // RunWorker works jobs until ctx is done. cmd/worker calls it.
-func RunWorker(ctx context.Context) error {
+func RunWorker(ctx context.Context, log *slog.Logger) error {
 	pool, err := connect(ctx)
 	if err != nil {
 		return err
@@ -69,8 +70,9 @@ func RunWorker(ctx context.Context) error {
 	defer pool.Close()
 
 	workers := river.NewWorkers()
-	river.AddWorker(workers, &ExampleWorker{})
+	river.AddWorker(workers, &ExampleWorker{log: log})
 	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		Logger:  log,
 		Queues:  map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 10}},
 		Workers: workers,
 	})

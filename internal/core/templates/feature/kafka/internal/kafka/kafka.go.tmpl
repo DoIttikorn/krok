@@ -3,7 +3,7 @@ package kafka
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -48,7 +48,7 @@ func (c *Client) Close() error {
 // Consume reads topics as a member of a consumer group and calls handle for
 // each record until ctx is done. Offsets are committed automatically after
 // records are polled, so a record can be delivered again after a crash.
-func Consume(ctx context.Context, group string, topics []string, handle func(context.Context, *kgo.Record) error) error {
+func Consume(ctx context.Context, log *slog.Logger, group string, topics []string, handle func(context.Context, *kgo.Record) error) error {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(Brokers()...),
 		kgo.ConsumerGroup(group),
@@ -66,25 +66,24 @@ func Consume(ctx context.Context, group string, topics []string, handle func(con
 			return nil
 		}
 		fetches.EachError(func(topic string, partition int32, err error) {
-			log.Printf("kafka: fetch %s[%d]: %v", topic, partition, err)
+			log.Error("fetch", "topic", topic, "partition", partition, "error", err)
 		})
 		fetches.EachRecord(func(r *kgo.Record) {
 			if err := handle(ctx, r); err != nil {
-				log.Printf("kafka: handle %s[%d]@%d: %v", r.Topic, r.Partition, r.Offset, err)
+				log.Error("handle record", "topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "error", err)
 			}
 		})
 	}
 }
 
-// RunWorker consumes Topic() and logs each record. Replace handleEvent with
+// RunWorker consumes Topic() and logs each record. Replace the handler with
 // your own logic. cmd/worker calls it.
-func RunWorker(ctx context.Context) error {
-	return Consume(ctx, getenv("KAFKA_GROUP", "{{.Name}}"), []string{Topic()}, handleEvent)
-}
-
-func handleEvent(ctx context.Context, r *kgo.Record) error {
-	log.Printf("kafka: %s key=%s value=%s", r.Topic, r.Key, r.Value)
-	return nil
+func RunWorker(ctx context.Context, log *slog.Logger) error {
+	handle := func(ctx context.Context, r *kgo.Record) error {
+		log.InfoContext(ctx, "record", "topic", r.Topic, "key", string(r.Key), "value", string(r.Value))
+		return nil
+	}
+	return Consume(ctx, log, getenv("KAFKA_GROUP", "{{.Name}}"), []string{Topic()}, handle)
 }
 
 func getenv(key, fallback string) string {

@@ -151,6 +151,21 @@ them as separate Deployments so each scales on its own.
 {{- end}}
 {{- end}}
 
+## Logging
+
+Everything logs through `log/slog`; `internal/logger` builds the logger, with
+**{{.Logger}}** as the backend. Requests are logged once, the same way for every
+framework, by `httpx.Log`, which also turns panics into 500 responses.
+{{- if .HasWorker}} Each worker logs with a `worker` attribute.{{end}}
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |
+| `LOG_FORMAT` | `text`, `json` | `text`; the Docker image sets `json` |
+
+To switch backends, replace `internal/logger/handler.go`; nothing else refers
+to {{.Logger}}.
+
 ## Configuration
 {{if .KeyVault}}
 Settings are read from Azure Key Vault at startup (`internal/config`):

@@ -27,6 +27,7 @@ krok new my-api -f gin -d none --dry-run       # preview files, write nothing
 | `-f, --framework` | `gin`, `echo`, `chi` |
 | `-d, --database` | `postgres`, `mysql`, `mongodb`, `none` |
 | `-m, --module` | Go module path (default: project name) |
+| `--log` | logging backend behind `log/slog`: `slog` (default), `zap`, `zerolog`, `charm` |
 | `--key-vault` | read settings from Azure Key Vault instead of `.env` (default: `.env`) |
 | `--openapi` | register routes with [Huma](https://huma.rocks): OpenAPI 3.1 spec and docs at `/docs` |
 | `--redis` | Redis client (go-redis v9) |
@@ -56,7 +57,8 @@ my-api/
 │   ├── memory/, postgres/ …   repository adapters, one per store
 │   ├── itemstest/             contract every adapter must pass
 │   └── handler/               REST adapter for the chosen framework
-├── internal/httpx/            JSON and RFC 9457 helpers for handlers
+├── internal/httpx/            JSON and RFC 9457 helpers, request logging for handlers
+├── internal/logger/           builds the *slog.Logger for the chosen --log backend
 ├── internal/database/         connection + health check (if a database is chosen)
 ├── internal/redis, kafka, …   one package per extra (--redis, --kafka, …)
 ├── cmd/worker/main.go         background consumers, when an extra needs one
@@ -172,6 +174,7 @@ modules can't import it, so it can change in any release.
 - `framework/<id>/`: the chosen framework
 - `database/<id>/`: the chosen database (skipped for `none`)
 - `config/<id>/`: the chosen config source (`env` or `keyvault`)
+- `logger/<id>/`: the chosen logging backend
 - `feature/<id>/`: each enabled extra
 
 A template that renders to only whitespace produces no file, so wrapping a

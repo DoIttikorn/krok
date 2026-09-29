@@ -6,7 +6,7 @@ package handler
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v5"
@@ -31,9 +31,10 @@ const BasePath = "/api/v1/items"
 // Handler serves BasePath.
 type Handler struct {
 	svc Service
+	log *slog.Logger
 }
 
-func New(svc Service) *Handler { return &Handler{svc: svc} }
+func New(svc Service, log *slog.Logger) *Handler { return &Handler{svc: svc, log: log} }
 
 // itemList is the body of GET BasePath. An object rather than a bare
 // array leaves room for pagination fields later.
@@ -43,7 +44,7 @@ type itemList struct {
 
 // fail writes the problem response that matches err. Unexpected errors are
 // logged, and their details are not sent to the client.
-func fail(w http.ResponseWriter, err error) {
+func (h *Handler) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, httpx.ErrBadRequest):
 		httpx.WriteProblem(w, http.StatusBadRequest, err.Error())
@@ -52,7 +53,7 @@ func fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, items.ErrInvalid):
 		httpx.WriteProblem(w, http.StatusUnprocessableEntity, err.Error())
 	default:
-		log.Printf("items: %v", err)
+		h.log.Error("items", "error", err)
 		httpx.WriteProblem(w, http.StatusInternalServerError, "")
 	}
 }
@@ -71,7 +72,7 @@ func (h *Handler) Register(g *echo.Group) {
 func (h *Handler) list(c *echo.Context) error {
 	list, err := h.svc.List(c.Request().Context())
 	if err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	return c.JSON(http.StatusOK, itemList{Items: list})
@@ -80,12 +81,12 @@ func (h *Handler) list(c *echo.Context) error {
 func (h *Handler) create(c *echo.Context) error {
 	var in items.Input
 	if err := httpx.DecodeJSON(c.Request(), &in); err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	it, err := h.svc.Create(c.Request().Context(), in)
 	if err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	c.Response().Header().Set("Location", BasePath+"/"+it.ID)
@@ -95,7 +96,7 @@ func (h *Handler) create(c *echo.Context) error {
 func (h *Handler) get(c *echo.Context) error {
 	it, err := h.svc.Get(c.Request().Context(), c.Param("id"))
 	if err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	return c.JSON(http.StatusOK, it)
@@ -104,12 +105,12 @@ func (h *Handler) get(c *echo.Context) error {
 func (h *Handler) update(c *echo.Context) error {
 	var in items.Input
 	if err := httpx.DecodeJSON(c.Request(), &in); err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	it, err := h.svc.Update(c.Request().Context(), c.Param("id"), in)
 	if err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	return c.JSON(http.StatusOK, it)
@@ -117,7 +118,7 @@ func (h *Handler) update(c *echo.Context) error {
 
 func (h *Handler) delete(c *echo.Context) error {
 	if err := h.svc.Delete(c.Request().Context(), c.Param("id")); err != nil {
-		fail(c.Response(), err)
+		h.fail(c.Response(), err)
 		return nil
 	}
 	return c.NoContent(http.StatusNoContent)

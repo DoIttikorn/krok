@@ -1,0 +1,24 @@
+package logger
+
+import (
+	"io"
+	"log/slog"
+	"time"
+
+	charmlog "charm.land/log/v2"
+)
+
+// newHandler writes through charmbracelet/log: colorful text in a terminal,
+// or JSON. Its levels have the same values as slog's.
+func newHandler(w io.Writer, level slog.Level, json bool) slog.Handler {
+	formatter := charmlog.TextFormatter
+	if json {
+		formatter = charmlog.JSONFormatter
+	}
+	return charmlog.NewWithOptions(w, charmlog.Options{
+		Level:           charmlog.Level(level),
+		Formatter:       formatter,
+		ReportTimestamp: true,
+		TimeFormat:      time.RFC3339,
+	})
+}

@@ -1,0 +1,20 @@
+package logger
+
+import (
+	"io"
+	"log/slog"
+	"time"
+
+	"github.com/rs/zerolog"
+	slogzerolog "github.com/samber/slog-zerolog/v2"
+)
+
+// newHandler writes through zerolog: JSON, or its console writer for text.
+func newHandler(w io.Writer, level slog.Level, json bool) slog.Handler {
+	out := w
+	if !json {
+		out = zerolog.ConsoleWriter{Out: w, TimeFormat: time.RFC3339}
+	}
+	zl := zerolog.New(out)
+	return slogzerolog.Option{Level: level, Logger: &zl}.NewZerologHandler()
+}

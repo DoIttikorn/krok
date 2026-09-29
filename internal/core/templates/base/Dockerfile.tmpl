@@ -12,6 +12,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # distroless/static has CA certificates and runs as a non-root user.
 FROM gcr.io/distroless/static-debian12:nonroot
+# One JSON object per line, for Kubernetes log collectors.
+ENV LOG_FORMAT=json
 {{- if eq .Framework "gin"}}
 ENV GIN_MODE=release
 {{- end}}

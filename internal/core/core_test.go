@@ -40,6 +40,15 @@ func combos() []Options {
 		o.Framework, o.Database, o.Config, o.Features = fw.ID, "none", "env", []string{"openapi"}
 		out = append(out, o)
 	}
+	for _, lg := range cat.Loggers {
+		if lg.ID == LoggerSlog {
+			continue // every combination above already uses slog
+		}
+		o := base
+		o.Framework, o.Database, o.Config, o.Logger = "gin", "postgres", "env", lg.ID
+		o.Features = []string{"kafka", "rabbitmq", "asynq", "river", "watermill"}
+		out = append(out, o)
+	}
 	for _, fs := range [][]string{
 		{"redis"},
 		{"kafka"},
@@ -62,6 +71,9 @@ func combos() []Options {
 
 func comboName(o Options) string {
 	name := o.Framework + "-" + o.Database + "-" + o.Config
+	if o.Logger != "" && o.Logger != LoggerSlog {
+		name += "-" + o.Logger
+	}
 	if len(o.Features) > 0 {
 		name += "+" + strings.Join(o.Features, "+")
 	}
@@ -78,17 +90,17 @@ func TestNormalize(t *testing.T) {
 		{
 			name: "defaults module path",
 			in:   Options{Name: "api", Framework: "chi", Database: "none", GoVersion: "1.24"},
-			want: Options{Name: "api", ModulePath: "api", Framework: "chi", Database: "none", Config: "env", GoVersion: "1.24"},
+			want: Options{Name: "api", ModulePath: "api", Framework: "chi", Database: "none", Config: "env", Logger: "slog", GoVersion: "1.24"},
 		},
 		{
 			name: "canonicalizes case and aliases",
 			in:   Options{Name: " api ", Framework: "GIN", Database: "PostgreSQL", Config: "Key-Vault", GoVersion: "go1.25"},
-			want: Options{Name: "api", ModulePath: "api", Framework: "gin", Database: "postgres", Config: "keyvault", GoVersion: "1.25"},
+			want: Options{Name: "api", ModulePath: "api", Framework: "gin", Database: "postgres", Config: "keyvault", Logger: "slog", GoVersion: "1.25"},
 		},
 		{
 			name: "mongo alias",
 			in:   Options{Name: "api", Framework: "echo", Database: "mongo", GoVersion: "1.24"},
-			want: Options{Name: "api", ModulePath: "api", Framework: "echo", Database: "mongodb", Config: "env", GoVersion: "1.24"},
+			want: Options{Name: "api", ModulePath: "api", Framework: "echo", Database: "mongodb", Config: "env", Logger: "slog", GoVersion: "1.24"},
 		},
 		{name: "missing name", in: Options{Framework: "chi", Database: "none"}, wantErr: "project name is required"},
 		{name: "bad name", in: Options{Name: "my api", Framework: "chi", Database: "none"}, wantErr: "invalid project name"},
@@ -99,11 +111,17 @@ func TestNormalize(t *testing.T) {
 		{
 			name: "features in catalog order, asynq brings redis",
 			in:   Options{Name: "api", Framework: "chi", Database: "none", GoVersion: "1.24", Features: []string{"asynq", "Rabbit", "kafka", "kafka"}},
-			want: Options{Name: "api", ModulePath: "api", Framework: "chi", Database: "none", Config: "env", GoVersion: "1.24", Features: []string{"redis", "kafka", "rabbitmq", "asynq"}},
+			want: Options{Name: "api", ModulePath: "api", Framework: "chi", Database: "none", Config: "env", Logger: "slog", GoVersion: "1.24", Features: []string{"redis", "kafka", "rabbitmq", "asynq"}},
 		},
 		{name: "unknown feature", in: Options{Name: "api", Framework: "chi", Database: "none", Features: []string{"nats"}}, wantErr: `unknown feature "nats"`},
 		{name: "river needs postgres", in: Options{Name: "api", Framework: "chi", Database: "mysql", Features: []string{"river"}}, wantErr: "river stores jobs in PostgreSQL"},
 		{name: "watermill needs a broker", in: Options{Name: "api", Framework: "chi", Database: "none", Features: []string{"watermill"}}, wantErr: "watermill needs a broker"},
+		{
+			name: "logger alias",
+			in:   Options{Name: "api", Framework: "chi", Database: "none", GoVersion: "1.24", Logger: "CharmBracelet"},
+			want: Options{Name: "api", ModulePath: "api", Framework: "chi", Database: "none", Config: "env", Logger: "charm", GoVersion: "1.24"},
+		},
+		{name: "unknown logger", in: Options{Name: "api", Framework: "chi", Database: "none", Logger: "logrus"}, wantErr: `unknown logger "logrus"`},
 		{name: "unknown config", in: Options{Name: "api", Framework: "chi", Database: "none", Config: "vault"}, wantErr: `unknown config source "vault"`},
 		{name: "bad go version", in: Options{Name: "api", Framework: "chi", Database: "none", GoVersion: "2"}, wantErr: "invalid Go version"},
 	}
@@ -240,6 +258,9 @@ func TestPlanLayers(t *testing.T) {
 	check("redis only", paths(Options{Name: "api", Framework: "chi", Database: "none", Features: []string{"redis"}}),
 		append(always, "internal/redis/redis.go"),
 		[]string{"cmd/worker/main.go"})
+	check("zap logger", paths(Options{Name: "api", Framework: "chi", Database: "none", Logger: "zap"}),
+		append(always, "internal/logger/logger.go", "internal/logger/handler.go", "internal/httpx/middleware.go"),
+		nil)
 	check("kafka", paths(Options{Name: "api", Framework: "chi", Database: "none", Features: []string{"kafka"}}),
 		append(always, "internal/kafka/kafka.go", "cmd/worker/main.go", "deploy/k8s/worker-deployment.yaml", "deploy/k8s/worker-pdb.yaml"),
 		nil)
@@ -315,6 +336,7 @@ func TestEmptyTemplateSkipsFile(t *testing.T) {
 		"base/skip.txt.tmpl":      {Data: []byte("{{if .HasWorker}}worker{{end}}\n")},
 		"framework/chi/a.go.tmpl": {Data: []byte("package a\n")},
 		"config/env/b.txt.tmpl":   {Data: []byte("b")},
+		"logger/slog/c.txt.tmpl":  {Data: []byte("c")},
 		// Same output path as base/keep.txt.tmpl, but renders empty: allowed.
 		"framework/chi/keep.txt.tmpl": {Data: []byte("{{if .HasWorker}}other{{end}}")},
 	}

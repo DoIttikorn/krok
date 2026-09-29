@@ -6,7 +6,7 @@ package rabbitmq
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -105,18 +105,18 @@ func (c *Client) Close() error {
 // RunWorker consumes Queue() until ctx is done, reconnecting with backoff
 // when RabbitMQ goes away, so the other consumers in cmd/worker keep running.
 // Replace handleMessage with your own logic.
-func RunWorker(ctx context.Context) error {
+func RunWorker(ctx context.Context, log *slog.Logger) error {
 	const maxBackoff = 30 * time.Second
 	backoff := time.Second
 	for {
-		connected, err := consume(ctx)
+		connected, err := consume(ctx, log)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if connected {
 			backoff = time.Second
 		}
-		log.Printf("rabbitmq: %v; reconnecting in %s", err, backoff)
+		log.Warn("connection lost, reconnecting", "error", err, "backoff", backoff)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -128,7 +128,7 @@ func RunWorker(ctx context.Context) error {
 
 // consume runs one connection until it fails or ctx is done. connected
 // reports whether it got as far as consuming.
-func consume(ctx context.Context) (connected bool, err error) {
+func consume(ctx context.Context, log *slog.Logger) (connected bool, err error) {
 	conn, err := dial()
 	if err != nil {
 		return false, err
@@ -148,7 +148,7 @@ func consume(ctx context.Context) (connected bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	log.Printf("rabbitmq: consuming %s", Queue())
+	log.Info("consuming", "queue", Queue())
 
 	for {
 		select {
@@ -158,8 +158,8 @@ func consume(ctx context.Context) (connected bool, err error) {
 			if !ok {
 				return true, errors.New("connection lost")
 			}
-			if err := handleMessage(ctx, d); err != nil {
-				log.Printf("rabbitmq: handle message: %v", err)
+			if err := handleMessage(ctx, log, d); err != nil {
+				log.Error("handle message", "error", err)
 				// Not requeued, to avoid redelivering a failing message
 				// forever. Configure a dead-letter exchange to keep it.
 				_ = d.Nack(false, false)
@@ -170,8 +170,8 @@ func consume(ctx context.Context) (connected bool, err error) {
 	}
 }
 
-func handleMessage(ctx context.Context, d amqp.Delivery) error {
-	log.Printf("rabbitmq: %s", d.Body)
+func handleMessage(ctx context.Context, log *slog.Logger, d amqp.Delivery) error {
+	log.InfoContext(ctx, "message", "body", string(d.Body))
 	return nil
 }
 

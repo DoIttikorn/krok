@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"time"
 
@@ -43,7 +42,7 @@ func (s *Server) health(ctx context.Context) (int, map[string]string) {
 	code, res := http.StatusOK, map[string]string{"status": "up"}
 	for name, check := range s.checks {
 		if err := check(ctx); err != nil {
-			log.Printf("health check %s: %v", name, err)
+			s.log.WarnContext(ctx, "health check failed", "check", name, "error", err)
 			res[name] = "down"
 			res["status"] = "down"
 			code = http.StatusServiceUnavailable

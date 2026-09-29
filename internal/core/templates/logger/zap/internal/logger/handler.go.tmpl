@@ -1,0 +1,39 @@
+package logger
+
+import (
+	"io"
+	"log/slog"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/exp/zapslog"
+	"go.uber.org/zap/zapcore"
+)
+
+// newHandler writes through zap: its production JSON encoder, or its
+// development console encoder for text.
+func newHandler(w io.Writer, level slog.Level, json bool) slog.Handler {
+	var enc zapcore.Encoder
+	if json {
+		cfg := zap.NewProductionEncoderConfig()
+		cfg.EncodeTime = zapcore.ISO8601TimeEncoder
+		enc = zapcore.NewJSONEncoder(cfg)
+	} else {
+		enc = zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig())
+	}
+	core := zapcore.NewCore(enc, zapcore.AddSync(w), zapLevel(level))
+	return zapslog.NewHandler(core)
+}
+
+// zapLevel maps a slog level onto zap's, which share names but not values.
+func zapLevel(l slog.Level) zapcore.Level {
+	switch {
+	case l < slog.LevelInfo:
+		return zapcore.DebugLevel
+	case l < slog.LevelWarn:
+		return zapcore.InfoLevel
+	case l < slog.LevelError:
+		return zapcore.WarnLevel
+	default:
+		return zapcore.ErrorLevel
+	}
+}

@@ -5,7 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"os"
 
 	"github.com/hibiken/asynq"
 
@@ -37,16 +38,19 @@ type Client = asynq.Client
 func NewClient(rdb *redis.Client) *Client { return asynq.NewClientFromRedisClient(rdb) }
 
 // RunWorker processes tasks until ctx is done. cmd/worker calls it.
-func RunWorker(ctx context.Context) error {
+func RunWorker(ctx context.Context, log *slog.Logger) error {
 	rdb, err := redis.New()
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
 
-	srv := asynq.NewServerFromRedisClient(rdb, asynq.Config{Concurrency: 10})
+	srv := asynq.NewServerFromRedisClient(rdb, asynq.Config{
+		Concurrency: 10,
+		Logger:      asynqLogger{log},
+	})
 	mux := asynq.NewServeMux()
-	mux.HandleFunc(TypeExample, handleExample)
+	mux.HandleFunc(TypeExample, handleExample(log))
 	if err := srv.Start(mux); err != nil {
 		return err
 	}
@@ -55,11 +59,27 @@ func RunWorker(ctx context.Context) error {
 	return nil
 }
 
-func handleExample(ctx context.Context, t *asynq.Task) error {
-	var p ExamplePayload
-	if err := json.Unmarshal(t.Payload(), &p); err != nil {
-		return fmt.Errorf("decode %s payload: %w", t.Type(), err)
+func handleExample(log *slog.Logger) asynq.HandlerFunc {
+	return func(ctx context.Context, t *asynq.Task) error {
+		var p ExamplePayload
+		if err := json.Unmarshal(t.Payload(), &p); err != nil {
+			return fmt.Errorf("decode %s payload: %w", t.Type(), err)
+		}
+		log.InfoContext(ctx, "task", "type", t.Type(), "message", p.Message)
+		return nil
 	}
-	log.Printf("asynq: %s: %s", t.Type(), p.Message)
-	return nil
+}
+
+// asynqLogger sends Asynq's own logs through slog.
+type asynqLogger struct{ log *slog.Logger }
+
+func (l asynqLogger) Debug(args ...any) { l.log.Debug(fmt.Sprint(args...)) }
+func (l asynqLogger) Info(args ...any)  { l.log.Info(fmt.Sprint(args...)) }
+func (l asynqLogger) Warn(args ...any)  { l.log.Warn(fmt.Sprint(args...)) }
+func (l asynqLogger) Error(args ...any) { l.log.Error(fmt.Sprint(args...)) }
+
+// Fatal exits, as asynq.Logger requires.
+func (l asynqLogger) Fatal(args ...any) {
+	l.log.Error(fmt.Sprint(args...))
+	os.Exit(1)
 }

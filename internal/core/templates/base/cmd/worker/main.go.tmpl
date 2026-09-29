@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"{{.ModulePath}}/internal/config"
+	"{{.ModulePath}}/internal/logger"
 {{- if .Has "watermill"}}
 	"{{.ModulePath}}/internal/events"
 {{- end}}
@@ -37,19 +38,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Settings first: LOG_LEVEL and LOG_FORMAT can come from them.
 	if err := config.Load(ctx); err != nil {
-		log.Fatalf("load config: %v", err)
+		fmt.Fprintln(os.Stderr, "load config:", err)
+		os.Exit(1)
+	}
+	log, err := logger.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "logger:", err)
+		os.Exit(1)
 	}
 
 	probes := probeServer()
 	go func() {
 		if err := probes.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("probe server: %v", err)
+			log.Error("probe server", "error", err)
 		}
 	}()
 	defer probes.Close()
 
-	err := run(ctx, map[string]func(context.Context) error{
+	err = run(ctx, log, map[string]worker{
 {{- if .Has "kafka"}}
 		"kafka":     kafka.RunWorker,
 {{- end}}
@@ -67,10 +75,15 @@ func main() {
 {{- end}}
 	})
 	if err != nil {
-		log.Fatalf("worker: %v", err)
+		log.Error("worker stopped", "error", err)
+		os.Exit(1)
 	}
-	log.Println("worker stopped")
+	log.Info("worker stopped")
 }
+
+// worker consumes until ctx is done. It logs through log, which already
+// carries the worker's name.
+type worker func(ctx context.Context, log *slog.Logger) error
 
 // probeServer serves /livez and /readyz on HEALTH_PORT (default 8081) for
 // Kubernetes. The worker takes no traffic, so both only report that the
@@ -93,7 +106,7 @@ func probeServer() *http.Server {
 
 // run starts every worker and waits for all of them. When one fails, the
 // others are stopped and its error is returned.
-func run(ctx context.Context, workers map[string]func(context.Context) error) error {
+func run(ctx context.Context, log *slog.Logger, workers map[string]worker) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -103,8 +116,9 @@ func run(ctx context.Context, workers map[string]func(context.Context) error) er
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			log.Printf("%s: started", name)
-			if err := work(ctx); err != nil {
+			wlog := log.With("worker", name)
+			wlog.Info("started")
+			if err := work(ctx, wlog); err != nil {
 				errs <- fmt.Errorf("%s: %w", name, err)
 				cancel()
 			}
