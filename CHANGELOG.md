@@ -4,7 +4,7 @@ krok follows [Semantic Versioning](https://semver.org) for its command line:
 the flags and the layout of generated projects. Until v1.0.0, minor versions
 may change them.
 
-## Unreleased
+## v0.2.0
 
 - The `items` example is laid out as ports and adapters: the domain package
   holds the model, `Service` and `Repository` interface; `memory`,
