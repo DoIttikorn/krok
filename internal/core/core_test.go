@@ -159,10 +159,10 @@ func TestGolden(t *testing.T) {
 			}
 			want, err := os.ReadFile(golden)
 			if err != nil {
-				t.Fatalf("%v (run: go test ./core -update)", err)
+				t.Fatalf("%v (run: go test ./internal/core -update)", err)
 			}
 			if !bytes.Equal(got, want) {
-				t.Errorf("output differs from %s; run: go test ./core -update and review the diff", golden)
+				t.Errorf("output differs from %s; run: go test ./internal/core -update and review the diff", golden)
 			}
 		})
 	}

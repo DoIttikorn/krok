@@ -1,7 +1,13 @@
 # Changelog
 
-krok follows [Semantic Versioning](https://semver.org). Until v1.0.0, minor
-versions may change the `core` API and the layout of generated projects.
+krok follows [Semantic Versioning](https://semver.org) for its command line:
+the flags and the layout of generated projects. Until v1.0.0, minor versions
+may change them.
+
+## Unreleased
+
+- Moved `core` to `internal/core`. krok is a command, not a library, so other
+  modules can no longer import it and it can change in any release.
 
 ## v0.1.0
 
