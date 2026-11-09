@@ -4,6 +4,14 @@ krok follows [Semantic Versioning](https://semver.org) for its command line:
 the flags and the layout of generated projects. Until v1.0.0, minor versions
 may change them.
 
+## Unreleased
+
+- The generated `docker-compose.yml` runs MongoDB 7 instead of 8. MongoDB 8.x
+  refuses to start on Linux kernels 6.19 and newer
+  ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)), so
+  `make deps-up` and `make up` failed on those hosts. The E2E test now prints
+  the database's state and logs when it fails to start.
+
 ## v0.2.1
 
 - Tests for the command line and the interactive prompts. `krok new` takes
