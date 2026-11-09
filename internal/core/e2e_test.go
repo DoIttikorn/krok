@@ -88,6 +88,19 @@ func integrationTest(t *testing.T, dir, name string) {
 		cmd.Dir, cmd.Env = dir, env
 		_ = cmd.Run()
 	})
+	// Registered after the teardown above, so it runs first: a database that
+	// never becomes healthy is undiagnosable without its state and logs.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, args := range [][]string{{"ps", "-a"}, {"logs", "--no-color", "db"}} {
+			cmd := exec.Command("docker", append([]string{"compose"}, args...)...)
+			cmd.Dir, cmd.Env = dir, env
+			out, _ := cmd.CombinedOutput()
+			t.Logf("docker compose %s:\n%s", strings.Join(args, " "), out)
+		}
+	})
 	run("docker", "compose", "up", "-d", "--wait", "db")
 	out := run("go", "test", "-count=1", "-v", "-run", "TestContract", "./internal/items/...")
 	// A skipped contract would pass silently, so make sure it really ran.
