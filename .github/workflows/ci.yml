@@ -5,6 +5,10 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # Weekly, so a break that comes from outside the code (an image tag, a runner
+  # kernel, a module) shows up within days instead of on the next unrelated PR.
+  schedule:
+    - cron: "0 3 * * 1"
 
 permissions:
   contents: read
@@ -52,3 +56,33 @@ jobs:
         env:
           KROK_E2E: "1"
           KROK_E2E_DOCKER: "1"
+
+  # Releases the newest version in CHANGELOG.md once main passes every check
+  # with it, unless that version is already tagged. scripts/release.sh prepares
+  # the CHANGELOG on a branch; merging that branch is what releases.
+  release:
+    name: Release
+    needs: [test, lint, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # tags, to tell whether the version is out already
+      - name: Tag and release the newest CHANGELOG version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 -E '^## v[0-9]+\.[0-9]+\.[0-9]+$' CHANGELOG.md | cut -c4-)
+          if [ -z "$version" ]; then echo "No released version in CHANGELOG.md"; exit 0; fi
+          if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            echo "$version is already released"
+            exit 0
+          fi
+          {
+            scripts/release-notes.sh "$version"
+            printf '\n## Install\n\n```bash\ngo install github.com/DoIttikorn/krok@%s\n```\n' "$version"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$version" --target "$GITHUB_SHA" --title "$version" --notes-file "$RUNNER_TEMP/notes.md"
