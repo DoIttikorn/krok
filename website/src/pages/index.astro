@@ -1,6 +1,6 @@
 ---
 import Base from "../layouts/Base.astro";
-import { databases, extras, frameworks } from "../scripts/catalog";
+import { databases, extras, frameworks, loggers } from "../scripts/catalog";
 
 const title = "krok — scaffold a ready-to-run Go API";
 const description =
@@ -79,6 +79,14 @@ const tree = `my-api/
             </div>
           </div>
           <div class="row">
+            <span class="k">logger</span>
+            <div class="chips" data-group="logger">
+              {loggers.map((l, i) => (
+                <button type="button" class="chip" data-value={l} aria-pressed={i === 0}>{l}</button>
+              ))}
+            </div>
+          </div>
+          <div class="row">
             <span class="k">extras</span>
             <div class="chips" data-group="extras">
               {extras.map((e) => (
@@ -138,9 +146,9 @@ const tree = `my-api/
 </Base>
 
 <script>
-  import { command, defaultName, normalize, validName, type Config, type Database, type Framework } from "../scripts/catalog";
+  import { command, defaultName, normalize, validName, type Config, type Database, type Framework, type Logger } from "../scripts/catalog";
 
-  const state: Config = { framework: "gin", database: "postgres", extras: [] };
+  const state: Config = { framework: "gin", database: "postgres", logger: "slog", extras: [] };
   const cmd = document.getElementById("cmd")!;
   const nameInput = document.getElementById("name") as HTMLInputElement;
   const nameErr = document.getElementById("name-err")!;
@@ -165,7 +173,13 @@ const tree = `my-api/
       const group = (b.parentElement as HTMLElement).dataset.group;
       const v = b.dataset.value!;
       const on =
-        group === "extras" ? c.extras.includes(v) : group === "framework" ? c.framework === v : c.database === v;
+        group === "extras"
+          ? c.extras.includes(v)
+          : group === "framework"
+            ? c.framework === v
+            : group === "logger"
+              ? c.logger === v
+              : c.database === v;
       b.setAttribute("aria-pressed", String(on));
       // River needs postgres, matching the CLI rule.
       b.disabled = v === "river" && c.database !== "postgres";
@@ -179,6 +193,7 @@ const tree = `my-api/
       const v = b.dataset.value!;
       if (group === "framework") state.framework = v as Framework;
       else if (group === "database") state.database = v as Database;
+      else if (group === "logger") state.logger = v as Logger;
       else state.extras = state.extras.includes(v) ? state.extras.filter((x) => x !== v) : [...state.extras, v];
       render();
     }),

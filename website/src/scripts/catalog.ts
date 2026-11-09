@@ -1,9 +1,13 @@
 // Mirrors internal/core/catalog.go and the rules in internal/core/options.go.
+// TestWebsiteFollowsTheCatalog in internal/cli fails when the two drift apart.
 export type Framework = "gin" | "echo" | "chi";
 export type Database = "postgres" | "mysql" | "mongodb" | "none";
+export type Logger = "slog" | "zap" | "zerolog" | "charm";
 
 export const frameworks: Framework[] = ["gin", "echo", "chi"];
 export const databases: Database[] = ["postgres", "mysql", "mongodb", "none"];
+// The first is the CLI default, so the command leaves --log out for it.
+export const loggers: Logger[] = ["slog", "zap", "zerolog", "charm"];
 
 export interface Extra {
   id: string;
@@ -60,6 +64,7 @@ export const databaseColor: Record<Database, number> = {
 export interface Config {
   framework: Framework;
   database: Database;
+  logger: Logger;
   extras: string[];
 }
 
@@ -85,6 +90,7 @@ export function validName(name: string): boolean {
 
 export function command(c: Config, name = defaultName): string {
   const parts = ["krok new", name, `-f ${c.framework}`, `-d ${c.database}`];
+  if (c.logger !== loggers[0]) parts.push(`--log ${c.logger}`);
   for (const e of extras) if (c.extras.includes(e.id)) parts.push(e.flag);
   return parts.join(" ");
 }
