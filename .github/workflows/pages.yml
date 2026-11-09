@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     paths: ["website/**", ".github/workflows/pages.yml"]
+  # Pull requests type-check and build the site, so a broken site or lockfile
+  # shows up before merge; only main deploys.
+  pull_request:
+    paths: ["website/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +16,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -27,14 +31,18 @@ jobs:
           cache-dependency-path: website/package-lock.json
       - run: npm ci
         working-directory: website
+      - run: npm run check
+        working-directory: website
       - run: npm run build
         working-directory: website
       - uses: actions/upload-pages-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           path: website/dist
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
