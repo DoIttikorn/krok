@@ -1,6 +1,10 @@
 # krok
 
 [![CI](https://github.com/DoIttikorn/krok/actions/workflows/ci.yml/badge.svg)](https://github.com/DoIttikorn/krok/actions/workflows/ci.yml)
+[![Website](https://github.com/DoIttikorn/krok/actions/workflows/pages.yml/badge.svg)](https://doittikorn.github.io/krok/)
+[![Release](https://img.shields.io/github/v/release/DoIttikorn/krok)](https://github.com/DoIttikorn/krok/releases)
+[![Go](https://img.shields.io/github/go-mod/go-version/DoIttikorn/krok)](go.mod)
+[![License](https://img.shields.io/github/license/DoIttikorn/krok)](LICENSE)
 
 Scaffold a ready-to-run Go API project with the framework and database you choose.
 
@@ -45,6 +49,16 @@ If `krok` is not found after installing, add Go's bin directory to your `PATH`:
 ```bash
 export PATH="$PATH:$(go env GOPATH)/bin"
 ```
+
+## Status
+
+| Area | Status |
+| --- | --- |
+| krok | Pre-1.0: flags and the generated layout may change between minor versions. Latest release and changes: [releases](https://github.com/DoIttikorn/krok/releases), [CHANGELOG.md](CHANGELOG.md). |
+| Tests | Vet, unit and golden tests with the race detector, gofmt and staticcheck run on every push and pull request (CI badge above). |
+| Generated projects | CI generates every framework, database and extras combination, runs `go mod tidy`, `go vet` and `go test` in each, and runs each database adapter's contract against a real database in Docker. |
+| Deployment files | CI validates `docker-compose.yml` and `deploy/k8s` with Docker Compose and kubectl. They have not yet been deployed to a real cluster. |
+| Website | [doittikorn.github.io/krok](https://doittikorn.github.io/krok/) is built from `website/` and deployed on every change to it (Website badge above). |
 
 ## Generated project
 
