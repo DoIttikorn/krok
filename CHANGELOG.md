@@ -4,7 +4,7 @@ krok follows [Semantic Versioning](https://semver.org) for its command line:
 the flags and the layout of generated projects. Until v1.0.0, minor versions
 may change them.
 
-## Unreleased
+## v0.2.2
 
 - The generated `docker-compose.yml` runs MongoDB 7 instead of 8. MongoDB 8.x
   refuses to start on Linux kernels 6.19 and newer
